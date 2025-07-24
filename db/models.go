@@ -11,7 +11,7 @@ import (
 type GithubPullRequest struct {
 	ID                   int64
 	GithubRepoID         int64
-	GithubPrID           string
+	GithubPrID           int64
 	GitlabMergeRequestID pgtype.Int8
 	Status               string
 	CreatedAt            pgtype.Timestamp

@@ -17,7 +17,7 @@ INSERT INTO github_pull_request (github_repo_id, github_pr_id, gitlab_merge_requ
 
 type CreateGithubPullRequestParams struct {
 	GithubRepoID         int64
-	GithubPrID           string
+	GithubPrID           int64
 	GitlabMergeRequestID pgtype.Int8
 	Status               string
 }
@@ -64,6 +64,38 @@ func (q *Queries) CreateGitlabMergeRequest(ctx context.Context, arg CreateGitlab
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const getGitHubPullRequestViaGitLabMRID = `-- name: GetGitHubPullRequestViaGitLabMRID :many
+SELECT id, github_repo_id, github_pr_id, gitlab_merge_request_id, status, created_at, updated_at FROM github_pull_request WHERE gitlab_merge_request_id = $1
+`
+
+func (q *Queries) GetGitHubPullRequestViaGitLabMRID(ctx context.Context, gitlabMergeRequestID pgtype.Int8) ([]GithubPullRequest, error) {
+	rows, err := q.db.Query(ctx, getGitHubPullRequestViaGitLabMRID, gitlabMergeRequestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GithubPullRequest
+	for rows.Next() {
+		var i GithubPullRequest
+		if err := rows.Scan(
+			&i.ID,
+			&i.GithubRepoID,
+			&i.GithubPrID,
+			&i.GitlabMergeRequestID,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getGithubRepo = `-- name: GetGithubRepo :one
@@ -129,6 +161,20 @@ func (q *Queries) GetUnknownMergeRequests(ctx context.Context, gitlabProjectID i
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateMergeRequestMigration = `-- name: UpdateMergeRequestMigration :exec
+UPDATE gitlab_merge_request SET status = $1 WHERE id = $2
+`
+
+type UpdateMergeRequestMigrationParams struct {
+	Status string
+	ID     int64
+}
+
+func (q *Queries) UpdateMergeRequestMigration(ctx context.Context, arg UpdateMergeRequestMigrationParams) error {
+	_, err := q.db.Exec(ctx, updateMergeRequestMigration, arg.Status, arg.ID)
+	return err
 }
 
 const updateMergeRequestMigrationDone = `-- name: UpdateMergeRequestMigrationDone :exec

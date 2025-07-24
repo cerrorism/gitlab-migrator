@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/go-git/go-billy/v5/memfs"
 	"github.com/go-git/go-git/v5/storage/memory"
+	"github.com/manicminer/gitlab-migrator/db"
 	"net/http"
 	"net/url"
 	"strings"
@@ -125,29 +126,13 @@ func migratePullRequests(ctx context.Context, mc *migrationContext) {
 			continue
 		}
 		logger.Info(fmt.Sprintf("migrating merge request ID = %d", mr.GitlabMrIid))
-		migrateSingleMergeRequest(ctx, mc, mergeRequest)
-	}
-	/*
-		var successCount, failureCount int
-		for mrId := 64; mrId <= 75; mrId++ {
-			mergeRequest, _, err := gl.MergeRequests.GetMergeRequest(project.ID, mrId, &gitlab.GetMergeRequestsOptions{})
-			if err != nil {
-				if errors.Is(err, gitlab.ErrNotFound) {
-					logger.Info(fmt.Sprintf("skip non-existing merge request ID = %d", mrId))
-					continue
-				} else {
-					sendErr(fmt.Errorf("retrieving gitlab merge request %d: %v", mrId, err))
-					return
-				}
-
-			}
-
-			if mergeRequest == nil {
-				continue
-			}
-			logger.Info(fmt.Sprintf("migrating merge request ID = %d", mrId))
-			migrateSingleMergeRequest(ctx, githubPath, project, repo, mergeRequest)
+		result := migrateSingleMergeRequest(ctx, mc, mergeRequest)
+		err = mc.qtx.UpdateMergeRequestMigration(ctx, db.UpdateMergeRequestMigrationParams{
+			Status: result,
+			ID:     mr.ID,
+		})
+		if err != nil {
+			return
 		}
-	*/
-
+	}
 }

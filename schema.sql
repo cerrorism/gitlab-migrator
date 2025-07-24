@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS gitlab_merge_request (
 CREATE TABLE IF NOT EXISTS github_pull_request (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     github_repo_id BIGINT NOT NULL REFERENCES github_repo(id),
-    github_pr_id TEXT NOT NULL,
+    github_pr_id BIGINT NOT NULL,
     gitlab_merge_request_id BIGINT REFERENCES gitlab_merge_request(id),
     status TEXT NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

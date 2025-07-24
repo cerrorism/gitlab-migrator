@@ -13,6 +13,9 @@ SELECT * FROM github_repo WHERE id = $1;
 -- name: GetUnknownMergeRequests :many
 SELECT * FROM gitlab_merge_request WHERE gitlab_project_id = $1 and status = 'unknown' order by id FOR UPDATE SKIP LOCKED limit 10;
 
+-- name: GetGitHubPullRequestViaGitLabMRID :many
+SELECT * FROM github_pull_request WHERE gitlab_merge_request_id = $1;
+
 -- name: UpdateMergeRequestMigrationDone :exec
 UPDATE gitlab_merge_request SET status = 'done' WHERE id = $1;
 
@@ -21,3 +24,6 @@ UPDATE gitlab_merge_request SET status = 'failed' WHERE id = $1;
 
 -- name: UpdateMergeRequestMigrationSkipped :exec
 UPDATE gitlab_merge_request SET status = 'skipped' WHERE id = $1;
+
+-- name: UpdateMergeRequestMigration :exec
+UPDATE gitlab_merge_request SET status = $1 WHERE id = $2;

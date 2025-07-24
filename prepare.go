@@ -63,10 +63,6 @@ func prepareAndSetup() context.Context {
 		githubUser = os.Getenv("GITHUB_USER")
 	}
 
-	if githubUser == "" {
-		githubUser = "zhengguang-valon"
-	}
-
 	retryClient := &retryablehttp.Client{
 		HTTPClient:   cleanhttp.DefaultPooledClient(),
 		Logger:       nil,
