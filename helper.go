@@ -12,7 +12,7 @@ import (
 func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (*github.PullRequest, error) {
 	var err error
 	cacheToken := fmt.Sprintf("%s/%s/%d", org, repo, prNumber)
-	pullRequest := cache.getGithubPullRequest(cacheToken)
+	pullRequest := inMemCache.getGithubPullRequest(cacheToken)
 	if pullRequest == nil {
 		logger.Debug("retrieving pull request details", "owner", org, "repo", repo, "pr_number", prNumber)
 		pullRequest, _, err = gh.PullRequests.Get(ctx, org, repo, prNumber)
@@ -25,7 +25,7 @@ func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (
 		}
 
 		logger.Trace("caching pull request details", "owner", org, "repo", repo, "pr_number", prNumber)
-		cache.setGithubPullRequest(cacheToken, *pullRequest)
+		inMemCache.setGithubPullRequest(cacheToken, *pullRequest)
 	}
 
 	return pullRequest, nil
@@ -33,7 +33,7 @@ func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (
 
 func getGithubSearchResults(ctx context.Context, query string) (*github.IssuesSearchResult, error) {
 	var err error
-	result := cache.getGithubSearchResults(query)
+	result := inMemCache.getGithubSearchResults(query)
 	if result == nil {
 		logger.Debug("performing search", "query", query)
 		result, _, err = gh.Search.Issues(ctx, query, nil)
@@ -46,7 +46,7 @@ func getGithubSearchResults(ctx context.Context, query string) (*github.IssuesSe
 		}
 
 		logger.Trace("caching GitHub search result", "query", query)
-		cache.setGithubSearchResults(query, *result)
+		inMemCache.setGithubSearchResults(query, *result)
 	}
 
 	return result, nil
@@ -54,7 +54,7 @@ func getGithubSearchResults(ctx context.Context, query string) (*github.IssuesSe
 
 func getGithubUser(ctx context.Context, username string) (*github.User, error) {
 	var err error
-	user := cache.getGithubUser(username)
+	user := inMemCache.getGithubUser(username)
 	if user == nil {
 		logger.Debug("retrieving user details", "username", username)
 		if user, _, err = gh.Users.Get(ctx, username); err != nil {
@@ -66,7 +66,7 @@ func getGithubUser(ctx context.Context, username string) (*github.User, error) {
 		}
 
 		logger.Trace("caching GitHub user", "username", username)
-		cache.setGithubUser(username, *user)
+		inMemCache.setGithubUser(username, *user)
 	}
 
 	if user.Type == nil {
@@ -77,7 +77,7 @@ func getGithubUser(ctx context.Context, username string) (*github.User, error) {
 }
 
 func getGitlabUser(username string) (*gitlab.User, error) {
-	user := cache.getGitlabUser(username)
+	user := inMemCache.getGitlabUser(username)
 	if user == nil {
 		logger.Debug("retrieving user details", "username", username)
 		users, _, err := gl.Users.ListUsers(&gitlab.ListUsersOptions{Username: &username})
@@ -88,7 +88,7 @@ func getGitlabUser(username string) (*gitlab.User, error) {
 		for _, user = range users {
 			if user != nil && user.Username == username {
 				logger.Trace("caching GitLab user", "username", username)
-				cache.setGitlabUser(username, *user)
+				inMemCache.setGitlabUser(username, *user)
 
 				return user, nil
 			}

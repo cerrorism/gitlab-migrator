@@ -20,7 +20,7 @@ import (
 	"github.com/xanzy/go-gitlab"
 )
 
-func migrateSingleMergeRequest(ctx context.Context, githubPath []string, project *gitlab.Project, repo *git.Repository, mergeRequest *gitlab.MergeRequest) (int, int) {
+func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeRequest *gitlab.MergeRequest) (int, int) {
 	successCount := 0
 	failureCount := 0
 	if err := ctx.Err(); err != nil {
@@ -276,7 +276,7 @@ func migrateSingleMergeRequest(ctx context.Context, githubPath []string, project
 		mergeRequestTitle = mergeRequestTitle[:40] + "..."
 	}
 
-	gitlabPath := strings.Split(gitlabProject, "/")
+	gitlabPath := strings.Split("serviceone/front-porch", "/")
 	body := fmt.Sprintf(`> [!NOTE]
 > This pull request was migrated from GitLab
 >
