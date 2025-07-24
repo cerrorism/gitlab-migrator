@@ -11,7 +11,7 @@ SELECT * FROM gitlab_project WHERE id = $1;
 SELECT * FROM github_repo WHERE id = $1;
 
 -- name: GetUnknownMergeRequests :many
-SELECT * FROM gitlab_merge_request WHERE gitlab_project_id = $1 and status = 'unknown' order by id FOR UPDATE SKIP LOCKED limit 10;
+UPDATE gitlab_merge_request SET status='ongoing' WHERE id in (SELECT * FROM gitlab_merge_request as gmr WHERE gmr.gitlab_project_id = $1 and status = 'unknown' order by id FOR UPDATE SKIP LOCKED limit 10) RETURNING *;
 
 -- name: GetGitHubPullRequestViaGitLabMRID :many
 SELECT * FROM github_pull_request WHERE gitlab_merge_request_id = $1;

@@ -59,8 +59,10 @@ func prepareAndSetup() context.Context {
 		os.Exit(1)
 	}
 
+	githubUser = os.Getenv("GITHUB_USER")
 	if githubUser == "" {
-		githubUser = os.Getenv("GITHUB_USER")
+		logger.Error("missing environment variable", "name", "GITHUB_USER")
+		os.Exit(1)
 	}
 
 	retryClient := &retryablehttp.Client{

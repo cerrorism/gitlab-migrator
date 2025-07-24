@@ -59,20 +59,11 @@ func main() {
 	defer func(database *pgx.Conn, ctx context.Context) {
 		_ = database.Close(ctx)
 	}(database, ctx)
-
-	tx, err := database.Begin(ctx)
-	if err != nil {
-		logger.Error("failed to get tx", "error", err)
-		os.Exit(1)
-	}
-	qtx := queries.WithTx(tx)
-	defer func(tx pgx.Tx, ctx context.Context) {
-		_ = tx.Rollback(ctx)
-	}(tx, ctx)
+	queries := db.New(database)
 
 	if false {
 		for i := 1; i <= 47589; i++ {
-			_, err := qtx.CreateGitlabMergeRequest(ctx, db.CreateGitlabMergeRequestParams{
+			_, err := queries.CreateGitlabMergeRequest(ctx, db.CreateGitlabMergeRequestParams{
 				GitlabProjectID: 1,
 				GitlabMrIid:     int64(i),
 				Status:          "unknown",
@@ -84,12 +75,12 @@ func main() {
 		}
 	}
 
-	githubRepo, err := qtx.GetGithubRepo(ctx, 1)
+	githubRepo, err := queries.GetGithubRepo(ctx, 1)
 	if err != nil {
 		logger.Error("failed to get github repo", "error", err)
 		os.Exit(1)
 	}
-	gitlabProject, err := qtx.GetGitlabProject(ctx, 1)
+	gitlabProject, err := queries.GetGitlabProject(ctx, 1)
 	if err != nil {
 		logger.Error("failed to get gitlab project", "error", err)
 		os.Exit(1)
@@ -97,7 +88,7 @@ func main() {
 	mc := &migrationContext{
 		githubRepo:    &githubRepo,
 		gitlabProject: &gitlabProject,
-		qtx:           qtx,
+		qtx:           queries,
 	}
 
 	if err = migrateProject(ctx, mc); err != nil {
@@ -107,5 +98,4 @@ func main() {
 		logger.Warn(fmt.Sprintf("encountered %d errors during migration, review log output for details", errCount))
 		os.Exit(1)
 	}
-	_ = tx.Commit(ctx)
 }

@@ -133,7 +133,7 @@ func (q *Queries) GetGitlabProject(ctx context.Context, id int64) (GitlabProject
 }
 
 const getUnknownMergeRequests = `-- name: GetUnknownMergeRequests :many
-SELECT id, gitlab_project_id, gitlab_mr_iid, status, created_at, updated_at FROM gitlab_merge_request WHERE gitlab_project_id = $1 and status = 'unknown' order by id FOR UPDATE SKIP LOCKED limit 10
+UPDATE gitlab_merge_request SET status='ongoing' WHERE id in (SELECT id, gitlab_project_id, gitlab_mr_iid, status, created_at, updated_at FROM gitlab_merge_request as gmr WHERE gmr.gitlab_project_id = $1 and status = 'unknown' order by id FOR UPDATE SKIP LOCKED limit 10) RETURNING id, gitlab_project_id, gitlab_mr_iid, status, created_at, updated_at
 `
 
 func (q *Queries) GetUnknownMergeRequests(ctx context.Context, gitlabProjectID int64) ([]GitlabMergeRequest, error) {

@@ -111,7 +111,7 @@ func migratePullRequests(ctx context.Context, mc *migrationContext) {
 	}
 
 	for _, mr := range mrs {
-		logger.Info(fmt.Sprintf("migrating merge request ID = %s", mr.GitlabMrIid))
+		logger.Info(fmt.Sprintf("migrating merge request ID = %d", mr.GitlabMrIid))
 		mergeRequest, _, err := gl.MergeRequests.GetMergeRequest(mc.gitlabProjectFromAPI.ID, int(mr.GitlabMrIid), &gitlab.GetMergeRequestsOptions{})
 		if err != nil {
 			if errors.Is(err, gitlab.ErrNotFound) {
@@ -125,14 +125,14 @@ func migratePullRequests(ctx context.Context, mc *migrationContext) {
 		if mergeRequest == nil {
 			continue
 		}
-		logger.Info(fmt.Sprintf("migrating merge request ID = %d", mr.GitlabMrIid))
 		result := migrateSingleMergeRequest(ctx, mc, mergeRequest)
 		err = mc.qtx.UpdateMergeRequestMigration(ctx, db.UpdateMergeRequestMigrationParams{
 			Status: result,
 			ID:     mr.ID,
 		})
 		if err != nil {
-			return
+			logger.Error(fmt.Sprintf("failed to update merge request: %s", err.Error()), err)
+			continue
 		}
 	}
 }
