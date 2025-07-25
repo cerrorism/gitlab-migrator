@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofri/go-github-pagination/githubpagination"
@@ -16,6 +19,127 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/xanzy/go-gitlab"
 )
+
+// logAPIResponse logs detailed information about HTTP responses, especially for failures
+func logAPIResponse(resp *http.Response, err error, isRetry bool) {
+	if resp == nil && err != nil {
+		logger.Error("API request failed with error", "error", err.Error(), "retry", isRetry)
+		return
+	}
+
+	if resp == nil {
+		logger.Error("API request failed with nil response", "error", err, "retry", isRetry)
+		return
+	}
+
+	requestMethod := "unknown"
+	requestURL := "unknown"
+	if req := resp.Request; req != nil {
+		requestMethod = req.Method
+		if req.URL != nil {
+			requestURL = req.URL.String()
+		}
+	}
+
+	// Success cases (2xx) - only log at trace level
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		logger.Trace("API request successful",
+			"method", requestMethod,
+			"url", requestURL,
+			"status", resp.StatusCode)
+		return
+	}
+
+	// Read response body for error details
+	var responseBody string
+	if resp.Body != nil {
+		// Don't read more than 4KB of response body
+		bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if readErr == nil {
+			responseBody = strings.TrimSpace(string(bodyBytes))
+		} else {
+			responseBody = fmt.Sprintf("failed to read response body: %v", readErr)
+		}
+
+		// Close and restore the body for potential retries
+		resp.Body.Close()
+		resp.Body = io.NopCloser(strings.NewReader(string(bodyBytes)))
+	}
+
+	// Rate limiting cases (special handling)
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden {
+		var rateLimitInfo []interface{}
+
+		if remaining := resp.Header.Get("X-Ratelimit-Remaining"); remaining != "" {
+			rateLimitInfo = append(rateLimitInfo, "remaining", remaining)
+		}
+		if reset := resp.Header.Get("X-Ratelimit-Reset"); reset != "" {
+			rateLimitInfo = append(rateLimitInfo, "reset_time", reset)
+		}
+		if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+			rateLimitInfo = append(rateLimitInfo, "retry_after", retryAfter)
+		}
+
+		logArgs := []interface{}{
+			"method", requestMethod,
+			"url", requestURL,
+			"status", resp.StatusCode,
+			"reason", "rate_limited",
+			"retry", isRetry,
+		}
+		logArgs = append(logArgs, rateLimitInfo...)
+
+		if responseBody != "" {
+			logArgs = append(logArgs, "response_body", responseBody)
+		}
+
+		logger.Warn("API request rate limited", logArgs...)
+		return
+	}
+
+	// All other error cases
+	logLevel := hclog.Error
+	if isRetry {
+		logLevel = hclog.Warn // Use warn level for retryable errors
+	}
+
+	logArgs := []interface{}{
+		"method", requestMethod,
+		"url", requestURL,
+		"status", resp.StatusCode,
+		"retry", isRetry,
+	}
+
+	if err != nil {
+		logArgs = append(logArgs, "error", err.Error())
+	}
+
+	if responseBody != "" {
+		logArgs = append(logArgs, "response_body", responseBody)
+	}
+
+	// Add status-specific context
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		logArgs = append(logArgs, "reason", "unauthorized - check authentication token")
+	case http.StatusNotFound:
+		logArgs = append(logArgs, "reason", "resource not found")
+	case http.StatusUnprocessableEntity:
+		logArgs = append(logArgs, "reason", "validation error")
+	case http.StatusInternalServerError:
+		logArgs = append(logArgs, "reason", "server error")
+	case http.StatusBadGateway:
+		logArgs = append(logArgs, "reason", "bad gateway")
+	case http.StatusServiceUnavailable:
+		logArgs = append(logArgs, "reason", "service unavailable")
+	case http.StatusGatewayTimeout:
+		logArgs = append(logArgs, "reason", "gateway timeout")
+	default:
+		logArgs = append(logArgs, "reason", "http error")
+	}
+
+	logger.Log(logLevel, "API request failed", logArgs...)
+}
 
 func prepareAndSetup() context.Context {
 	var err error
@@ -85,7 +209,24 @@ func prepareAndSetup() context.Context {
 		}
 
 		defer func() {
-			logger.Trace("waiting before retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "sleep", sleep, "attempt", attemptNum, "max_attempts", retryClient.RetryMax)
+			logArgs := []interface{}{
+				"method", requestMethod,
+				"url", requestUrl,
+				"status", resp.StatusCode,
+				"sleep", sleep.String(),
+				"attempt", attemptNum + 1,
+				"max_attempts", retryClient.RetryMax,
+			}
+
+			// Add rate limiting context if present
+			if remaining := resp.Header.Get("X-Ratelimit-Remaining"); remaining != "" {
+				logArgs = append(logArgs, "rate_limit_remaining", remaining)
+			}
+			if reset := resp.Header.Get("X-Ratelimit-Reset"); reset != "" {
+				logArgs = append(logArgs, "rate_limit_reset", reset)
+			}
+
+			logger.Info("retrying API request after backoff", logArgs...)
 		}()
 
 		if resp != nil {
@@ -132,6 +273,7 @@ func prepareAndSetup() context.Context {
 
 	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
 		if err != nil {
+			logAPIResponse(resp, err, false)
 			return false, err
 		}
 
@@ -152,21 +294,16 @@ func prepareAndSetup() context.Context {
 			http.StatusGatewayTimeout,
 		}
 
-		requestMethod := "unknown"
-		requestUrl := "unknown"
-
-		if req := resp.Request; req != nil {
-			requestMethod = req.Method
-			if req.URL != nil {
-				requestUrl = req.URL.String()
+		for _, status := range retryableStatuses {
+			if resp.StatusCode == status {
+				logAPIResponse(resp, err, true) // Log retryable errors
+				return true, nil
 			}
 		}
 
-		for _, status := range retryableStatuses {
-			if resp.StatusCode == status {
-				logger.Trace("retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode)
-				return true, nil
-			}
+		// For non-retryable errors, log them as final failures
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			logAPIResponse(resp, err, false)
 		}
 
 		return false, nil

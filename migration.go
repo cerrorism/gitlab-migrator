@@ -29,6 +29,7 @@ func updateStoredMergeRequests(ctx context.Context, mc *migrationContext) error 
 			MergeCommitSha:   mr.MergeCommitSHA,
 			Parent1CommitSha: mr.BaseParent,
 			Parent2CommitSha: mr.HeadParent,
+			Status:           mr.Status,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create merge request: %v", err)

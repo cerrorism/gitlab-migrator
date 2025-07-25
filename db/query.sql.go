@@ -10,7 +10,7 @@ import (
 )
 
 const createGitlabMergeRequest = `-- name: CreateGitlabMergeRequest :one
-INSERT INTO gitlab_merge_request (migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha) VALUES ($1, $2, $3, $4, $5) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
+INSERT INTO gitlab_merge_request (migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
 `
 
 type CreateGitlabMergeRequestParams struct {
@@ -19,6 +19,7 @@ type CreateGitlabMergeRequestParams struct {
 	MergeCommitSha   string
 	Parent1CommitSha string
 	Parent2CommitSha string
+	Status           string
 }
 
 func (q *Queries) CreateGitlabMergeRequest(ctx context.Context, arg CreateGitlabMergeRequestParams) (GitlabMergeRequest, error) {
@@ -28,6 +29,7 @@ func (q *Queries) CreateGitlabMergeRequest(ctx context.Context, arg CreateGitlab
 		arg.MergeCommitSha,
 		arg.Parent1CommitSha,
 		arg.Parent2CommitSha,
+		arg.Status,
 	)
 	var i GitlabMergeRequest
 	err := row.Scan(
@@ -71,7 +73,7 @@ func (q *Queries) GetAllGitLabToGithubMigrationIIDs(ctx context.Context, migrati
 }
 
 const getGitLabToGithubMigration = `-- name: GetGitLabToGithubMigration :one
-SELECT id, gitlab_project_name, github_repo_name, status, notes, created_at, updated_at FROM gitlab_to_github_migration WHERE status = 'pending' order by id FOR UPDATE SKIP LOCKED limit 1
+SELECT id, gitlab_project_name, github_repo_name, status, notes, created_at, updated_at FROM gitlab_to_github_migration WHERE status = 'ONGOING' order by id FOR UPDATE SKIP LOCKED limit 1
 `
 
 func (q *Queries) GetGitLabToGithubMigration(ctx context.Context) (GitlabToGithubMigration, error) {
@@ -90,7 +92,7 @@ func (q *Queries) GetGitLabToGithubMigration(ctx context.Context) (GitlabToGithu
 }
 
 const getGitlabMergeRequests = `-- name: GetGitlabMergeRequests :many
-UPDATE gitlab_merge_request SET status='ONGOING' WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = 'MR_FOUND' order by id FOR UPDATE SKIP LOCKED limit 500) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
+UPDATE gitlab_merge_request SET status='ONGOING' WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = 'MR_FOUND' order by id FOR UPDATE SKIP LOCKED limit 1000) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
 `
 
 func (q *Queries) GetGitlabMergeRequests(ctx context.Context, migrationID int64) ([]GitlabMergeRequest, error) {
@@ -123,20 +125,6 @@ func (q *Queries) GetGitlabMergeRequests(ctx context.Context, migrationID int64)
 		return nil, err
 	}
 	return items, nil
-}
-
-const updateGitlabMergeRequest = `-- name: UpdateGitlabMergeRequest :exec
-UPDATE gitlab_merge_request SET status = $1 WHERE id = $2
-`
-
-type UpdateGitlabMergeRequestParams struct {
-	Status string
-	ID     int64
-}
-
-func (q *Queries) UpdateGitlabMergeRequest(ctx context.Context, arg UpdateGitlabMergeRequestParams) error {
-	_, err := q.db.Exec(ctx, updateGitlabMergeRequest, arg.Status, arg.ID)
-	return err
 }
 
 const updateGitlabMergeRequestNotes = `-- name: UpdateGitlabMergeRequestNotes :exec
