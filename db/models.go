@@ -8,37 +8,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type GithubPullRequest struct {
-	ID                   int64
-	GithubRepoID         int64
-	GithubPrID           int64
-	GitlabMergeRequestID pgtype.Int8
-	Status               string
-	CreatedAt            pgtype.Timestamp
-	UpdatedAt            pgtype.Timestamp
-}
-
-type GithubRepo struct {
-	ID          int64
-	Name        string
-	Description pgtype.Text
-	CreatedAt   pgtype.Timestamp
-	UpdatedAt   pgtype.Timestamp
-}
-
 type GitlabMergeRequest struct {
-	ID              int64
-	GitlabProjectID int64
-	GitlabMrIid     int64
-	Status          string
-	CreatedAt       pgtype.Timestamp
-	UpdatedAt       pgtype.Timestamp
+	ID               int64
+	MigrationID      int64
+	MrIid            int64
+	MergeCommitSha   string
+	Parent1CommitSha string
+	Parent2CommitSha string
+	PrID             int64
+	Status           string
+	Notes            string
+	CreatedAt        pgtype.Timestamp
+	UpdatedAt        pgtype.Timestamp
 }
 
-type GitlabProject struct {
-	ID          int64
-	Name        string
-	Description pgtype.Text
-	CreatedAt   pgtype.Timestamp
-	UpdatedAt   pgtype.Timestamp
+type GitlabToGithubMigration struct {
+	ID                int64
+	GitlabProjectName string
+	GithubRepoName    string
+	Status            string
+	Notes             string
+	CreatedAt         pgtype.Timestamp
+	UpdatedAt         pgtype.Timestamp
 }

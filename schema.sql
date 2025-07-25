@@ -1,34 +1,23 @@
-CREATE TABLE IF NOT EXISTS gitlab_project (
+CREATE TABLE IF NOT EXISTS gitlab_to_github_migration (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS github_repo (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT,
+    gitlab_project_name TEXT NOT NULL,
+    github_repo_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    notes TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS gitlab_merge_request (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    gitlab_project_id BIGINT NOT NULL REFERENCES gitlab_project(id),
-    gitlab_mr_iid BIGINT NOT NULL,
-    status TEXT NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS github_pull_request (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    github_repo_id BIGINT NOT NULL REFERENCES github_repo(id),
-    github_pr_id BIGINT NOT NULL,
-    gitlab_merge_request_id BIGINT REFERENCES gitlab_merge_request(id),
-    status TEXT NOT NULL,
+    migration_id BIGINT NOT NULL REFERENCES gitlab_to_github_migration(id),
+    mr_iid BIGINT NOT NULL,
+    merge_commit_sha TEXT NOT NULL,
+    parent1_commit_sha TEXT NOT NULL,
+    parent2_commit_sha TEXT NOT NULL,
+    pr_id BIGINT NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    notes TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

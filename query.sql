@@ -1,29 +1,17 @@
--- name: CreateGithubPullRequest :one
-INSERT INTO github_pull_request (github_repo_id, github_pr_id, gitlab_merge_request_id, status) VALUES ($1, $2, $3, $4) RETURNING *;
+-- name: GetGitLabToGithubMigration :one
+SELECT * FROM gitlab_to_github_migration WHERE status = 'ONGOING' order by id FOR UPDATE SKIP LOCKED limit 1;
+
+-- name: GetAllGitLabToGithubMigrationIIDs :many
+SELECT mr_iid FROM gitlab_merge_request WHERE migration_id = $1;
 
 -- name: CreateGitlabMergeRequest :one
-INSERT INTO gitlab_merge_request (gitlab_project_id, gitlab_mr_iid, status) VALUES ($1, $2, $3) RETURNING *;
+INSERT INTO gitlab_merge_request (migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha) VALUES ($1, $2, $3, $4, $5) RETURNING *;
 
--- name: GetGitlabProject :one
-SELECT * FROM gitlab_project WHERE id = $1;
+-- name: GetGitlabMergeRequests :many
+UPDATE gitlab_merge_request SET status='ONGOING' WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = 'MR_FOUND' order by id FOR UPDATE SKIP LOCKED limit 500) RETURNING *;
 
--- name: GetGithubRepo :one
-SELECT * FROM github_repo WHERE id = $1;
+-- name: UpdateGitlabMergeRequestPRID :exec
+UPDATE gitlab_merge_request SET pr_id = $1, status='PR_CREATED' WHERE id = $2;
 
--- name: GetUnknownMergeRequests :many
-UPDATE gitlab_merge_request SET status='ongoing' WHERE id in (SELECT * FROM gitlab_merge_request as gmr WHERE gmr.gitlab_project_id = $1 and status = 'unknown' order by id FOR UPDATE SKIP LOCKED limit 10) RETURNING *;
-
--- name: GetGitHubPullRequestViaGitLabMRID :many
-SELECT * FROM github_pull_request WHERE gitlab_merge_request_id = $1;
-
--- name: UpdateMergeRequestMigrationDone :exec
-UPDATE gitlab_merge_request SET status = 'done' WHERE id = $1;
-
--- name: UpdateMergeRequestMigrationFailed :exec
-UPDATE gitlab_merge_request SET status = 'failed' WHERE id = $1;
-
--- name: UpdateMergeRequestMigrationSkipped :exec
-UPDATE gitlab_merge_request SET status = 'skipped' WHERE id = $1;
-
--- name: UpdateMergeRequestMigration :exec
-UPDATE gitlab_merge_request SET status = $1 WHERE id = $2;
+-- name: UpdateGitlabMergeRequestNotes :exec
+UPDATE gitlab_merge_request SET notes = $1 WHERE id = $2;

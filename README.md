@@ -1,14 +1,15 @@
-# GitLab to GitHub Repository Migration Tool
+# GitLab to GitHub Repository Migration Tool (Fork)
 
-This tool can migrate projects from GitLab to repositories on GitHub. It currently supports:
+**This is a fork of [@manicminer/gitlab-migrator](https://github.com/manicminer/gitlab-migrator) and has been heavily changed for specific use cases.**
 
-* migrating the git repository with full history
-* migrating merge requests and translating them into pull requests, including closed/merged ones
-* renaming the `master` branch to `main` along the way
+## Key Differences from Original
 
-It does not support migrating issues, wikis or any other primitive at this time. PRs welcome!
+This fork is specifically designed for:
 
-Both gitlab.com and GitLab self-hosted are supported, as well as github.com and GitHub Enterprise (latter untested).
+1. **Single project focus**: Optimized for migrating one project at a time, with a major focus on merge request migration (the most time-consuming part)
+2. **Simplified configuration**: Minimized command-line parameters, relying on environment variables for GitHub and GitLab tokens
+3. **Database-driven status tracking**: Instead of relying on stdout for migration status reporting, this fork uses a database to keep track of each merge request's migration status. This provides more reliability during large-scale MR migrations
+4. **Enhanced merge request handling**: Specialized optimizations for handling large volumes of merge requests efficiently
 
 ## Installing
 
@@ -27,6 +28,8 @@ _Example Usage_
 ```
 gitlab-migrator -github-user=mytokenuser -gitlab-project=mygitlabuser/myproject -github-repo=mygithubuser/myrepo -migrate-pull-requests
 ```
+
+**Note**: This fork has simplified the configuration approach. Most parameters are now handled through environment variables rather than command-line arguments.
 
 Written in Go, this is a cross-platform CLI utility that accepts the following runtime arguments:
 
@@ -66,6 +69,19 @@ gitlab-group/gitlab-project-name,github-org-or-user/github-repo-name
 ```
 
 For authentication, the `GITLAB_TOKEN` and `GITHUB_TOKEN` environment variables must be populated. You cannot specify tokens as command-line arguments.
+
+**This fork emphasizes environment variable configuration over command-line parameters for cleaner, more maintainable setups.**
+
+## Database-Driven Migration Tracking
+
+Unlike the original tool that relies on stdout for status reporting, this fork uses a database to track the migration status of each merge request. This approach provides:
+
+- **Reliability**: Migration status persists across tool restarts
+- **Progress tracking**: Detailed status of each merge request migration
+- **Resume capability**: Ability to resume interrupted migrations
+- **Audit trail**: Complete history of migration attempts and results
+
+The database schema automatically handles merge request states, timestamps, and error conditions, making it ideal for large-scale migrations where tracking hundreds or thousands of merge requests is critical.
 
 To enable migration of GitLab merge requests to GitHub pull requests (including closed/merged ones!), specify `-migrate-pull-requests`.
 

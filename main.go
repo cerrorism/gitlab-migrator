@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
-	"github.com/go-git/go-git/v5"
 	"github.com/google/go-github/v69/github"
 	"github.com/hashicorp/go-hclog"
 	"github.com/jackc/pgx/v5"
@@ -14,7 +14,7 @@ import (
 
 const (
 	dateFormat = "Mon, 2 Jan 2006"
-	dbString   = "user=zhengguang dbname=postgres sslmode=false"
+	dbString   = "user=postgres password=password dbname=postgres sslmode=false"
 )
 
 var (
@@ -36,11 +36,9 @@ func sendErr(err error) {
 }
 
 type migrationContext struct {
-	githubRepo           *db.GithubRepo
-	gitlabProject        *db.GitlabProject
-	gitlabProjectFromAPI *gitlab.Project
-	qtx                  *db.Queries
-	gitRepository        *git.Repository
+	migration     *db.GitlabToGithubMigration
+	gitlabProject *gitlab.Project
+	qtx           *db.Queries
 }
 
 func setupDb(ctx context.Context) {
@@ -53,6 +51,22 @@ func setupDb(ctx context.Context) {
 }
 
 func main() {
+	// Parse command line arguments
+	var updateStoredMRs = flag.Bool("update-stored-mrs", false, "update stored merge requests from repository analysis")
+	var migrateMRs = flag.Bool("migrate-mrs", false, "migrate merge requests from GitLab to GitHub")
+	flag.Parse()
+
+	// Validate that exactly one operation is specified
+	if *updateStoredMRs == *migrateMRs {
+		if *updateStoredMRs {
+			logger.Error("cannot specify both --update-stored-mrs and --migrate-mrs")
+		} else {
+			logger.Error("must specify either --update-stored-mrs or --migrate-mrs")
+		}
+		flag.Usage()
+		os.Exit(1)
+	}
+
 	prepareAndSetup()
 	ctx := context.Background()
 	setupDb(ctx)
@@ -61,41 +75,35 @@ func main() {
 	}(database, ctx)
 	queries := db.New(database)
 
-	if false {
-		for i := 1; i <= 47589; i++ {
-			_, err := queries.CreateGitlabMergeRequest(ctx, db.CreateGitlabMergeRequestParams{
-				GitlabProjectID: 1,
-				GitlabMrIid:     int64(i),
-				Status:          "unknown",
-			})
-			if err != nil {
-				logger.Error(fmt.Sprintf("cannot insert merge requests"))
-				return
-			}
-		}
-	}
-
-	githubRepo, err := queries.GetGithubRepo(ctx, 1)
+	migration, err := queries.GetGitLabToGithubMigration(ctx)
 	if err != nil {
 		logger.Error("failed to get github repo", "error", err)
 		os.Exit(1)
 	}
-	gitlabProject, err := queries.GetGitlabProject(ctx, 1)
-	if err != nil {
-		logger.Error("failed to get gitlab project", "error", err)
-		os.Exit(1)
-	}
 	mc := &migrationContext{
-		githubRepo:    &githubRepo,
-		gitlabProject: &gitlabProject,
-		qtx:           queries,
+		migration: &migration,
+		qtx:       queries,
 	}
 
-	if err = migrateProject(ctx, mc); err != nil {
-		sendErr(err)
-		os.Exit(1)
-	} else if errCount > 0 {
-		logger.Warn(fmt.Sprintf("encountered %d errors during migration, review log output for details", errCount))
+	// Execute the appropriate operation based on command line arguments
+	if *updateStoredMRs {
+		logger.Info("updating stored merge requests from repository analysis")
+		if err = updateStoredMergeRequests(ctx, mc); err != nil {
+			sendErr(err)
+			os.Exit(1)
+		}
+		logger.Info("successfully updated stored merge requests")
+	} else if *migrateMRs {
+		logger.Info("starting merge request migration from GitLab to GitHub")
+		if err = migrateProject(ctx, mc); err != nil {
+			sendErr(err)
+			os.Exit(1)
+		}
+		logger.Info("successfully completed merge request migration")
+	}
+
+	if errCount > 0 {
+		logger.Warn(fmt.Sprintf("encountered %d errors during operation, review log output for details", errCount))
 		os.Exit(1)
 	}
 }
