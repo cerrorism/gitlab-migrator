@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofri/go-github-pagination/githubpagination"
 	"github.com/google/go-github/v69/github"
 	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-hclog"
@@ -172,10 +171,7 @@ func prepareAndSetup() context.Context {
 	inMemCache = newObjectCache()
 
 	githubToken = os.Getenv("GITHUB_TOKEN")
-	if githubToken == "" {
-		logger.Error("missing environment variable", "name", "GITHUB_TOKEN")
-		os.Exit(1)
-	}
+	// Note: GITHUB_TOKEN is now optional, will fall back to GitHub App auth if not provided
 
 	gitlabToken = os.Getenv("GITLAB_TOKEN")
 	if gitlabToken == "" {
@@ -309,9 +305,33 @@ func prepareAndSetup() context.Context {
 		return false, nil
 	}
 
-	client := githubpagination.NewClient(&retryablehttp.RoundTripper{Client: retryClient}, githubpagination.WithPerPage(100))
+	// Create GitHub client with either PAT or App authentication
+	if githubToken != "" {
+		// Use Personal Access Token authentication
+		logger.Info("using GitHub Personal Access Token authentication")
+		gh = createGithubClientWithPAT(retryClient, githubToken)
+	} else {
+		// Try GitHub App authentication
+		logger.Info("GitHub token not found, attempting GitHub App authentication")
+		appConfig, configErr := parseGitHubAppConfigFromEnv()
+		if configErr != nil {
+			logger.Error("failed to parse GitHub App configuration", "error", configErr)
+			logger.Info("required environment variables for GitHub App auth:")
+			logger.Info("  GITHUB_APP_ID - your GitHub App ID")
+			logger.Info("  GITHUB_INSTALLATION_ID - installation ID for your app")
+			logger.Info("  GITHUB_PRIVATE_KEY_FILE - path to your app's private key file")
+			os.Exit(1)
+		}
 
-	gh = github.NewClient(client).WithAuthToken(githubToken)
+		gh, err = createGithubClientWithApp(retryClient, appConfig)
+		if err != nil {
+			logger.Error("failed to create GitHub App client", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("successfully configured GitHub App authentication",
+			"app_id", appConfig.AppID,
+			"installation_id", appConfig.InstallationID)
+	}
 
 	gitlabOpts := make([]gitlab.ClientOptionFunc, 0)
 	if gl, err = gitlab.NewClient(gitlabToken, gitlabOpts...); err != nil {

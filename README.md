@@ -68,7 +68,31 @@ Alternatively, you can supply the path to a CSV file with the `-projects-csv` ar
 gitlab-group/gitlab-project-name,github-org-or-user/github-repo-name
 ```
 
-For authentication, the `GITLAB_TOKEN` and `GITHUB_TOKEN` environment variables must be populated. You cannot specify tokens as command-line arguments.
+## Authentication
+
+This tool supports two authentication methods for GitHub:
+
+### Personal Access Token (PAT)
+```bash
+export GITHUB_TOKEN="ghp_your_personal_access_token"
+export GITLAB_TOKEN="glpat_your_gitlab_token"  
+export GITHUB_USER="your_github_username"
+```
+
+### GitHub App Authentication (Recommended for Organizations)
+```bash
+export GITHUB_APP_ID="123456"
+export GITHUB_INSTALLATION_ID="12345678"  
+export GITHUB_PRIVATE_KEY_FILE="/path/to/your/app-private-key.pem"
+export GITLAB_TOKEN="glpat_your_gitlab_token"
+export GITHUB_USER="your_github_username"
+```
+
+**GitHub App Benefits:**
+- Higher rate limits (5,000 requests/hour vs 1,000 for PAT)
+- Automatic token refresh (works for days without intervention)
+- Better security and auditing
+- Organization-level permissions
 
 **This fork emphasizes environment variable configuration over command-line parameters for cleaner, more maintainable setups.**
 
