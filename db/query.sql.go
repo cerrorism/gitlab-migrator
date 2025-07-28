@@ -92,7 +92,7 @@ func (q *Queries) GetGitLabToGithubMigration(ctx context.Context) (GitlabToGithu
 }
 
 const getGitlabMergeRequests = `-- name: GetGitlabMergeRequests :many
-UPDATE gitlab_merge_request SET status='ONGOING' WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = 'MR_FOUND' order by id FOR UPDATE SKIP LOCKED limit 1000) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
+UPDATE gitlab_merge_request SET status='ONGOING' WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = 'MR_FOUND' order by id FOR UPDATE SKIP LOCKED limit 10000) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
 `
 
 func (q *Queries) GetGitlabMergeRequests(ctx context.Context, migrationID int64) ([]GitlabMergeRequest, error) {

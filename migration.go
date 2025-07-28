@@ -4,10 +4,83 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 	"github.com/manicminer/gitlab-migrator/db"
 	"github.com/xanzy/go-gitlab"
 	"slices"
 )
+
+// RateLimiter implements a leaky bucket rate limiter
+type RateLimiter struct {
+	tokens    chan struct{}
+	ticker    *time.Ticker
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// NewRateLimiter creates a new rate limiter
+// rate: operations per second
+// burstSize: maximum burst capacity (bucket size)
+func NewRateLimiter(rate float64, burstSize int) *RateLimiter {
+	rl := &RateLimiter{
+		tokens: make(chan struct{}, burstSize),
+		ticker: time.NewTicker(time.Duration(float64(time.Second) / rate)),
+		done:   make(chan struct{}),
+	}
+
+	// Fill bucket initially to allow some immediate operations
+	for i := 0; i < burstSize; i++ {
+		select {
+		case rl.tokens <- struct{}{}:
+		default:
+			break
+		}
+	}
+
+	// Start the token replenishment goroutine
+	go rl.refill()
+
+	return rl
+}
+
+// Wait blocks until a token is available, respecting context cancellation
+func (rl *RateLimiter) Wait(ctx context.Context) error {
+	select {
+	case <-rl.tokens:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-rl.done:
+		return fmt.Errorf("rate limiter closed")
+	}
+}
+
+// refill adds tokens to the bucket at the specified rate
+func (rl *RateLimiter) refill() {
+	defer rl.ticker.Stop()
+	
+	for {
+		select {
+		case <-rl.ticker.C:
+			// Try to add a token (non-blocking)
+			select {
+			case rl.tokens <- struct{}{}:
+			default:
+				// Bucket is full, skip this token
+			}
+		case <-rl.done:
+			return
+		}
+	}
+}
+
+// Close stops the rate limiter
+func (rl *RateLimiter) Close() {
+	rl.closeOnce.Do(func() {
+		close(rl.done)
+	})
+}
 
 func updateStoredMergeRequests(ctx context.Context, mc *migrationContext) error {
 	existingMergeRequestIIDs, err := mc.qtx.GetAllGitLabToGithubMigrationIIDs(ctx, mc.migration.ID)
@@ -55,37 +128,99 @@ func migrateProject(ctx context.Context, mc *migrationContext) error {
 }
 
 func migratePullRequests(ctx context.Context, mc *migrationContext) {
+	// Create rate limiter for 470 PRs/hour with smooth distribution
+	// 470 PRs/hour = 0.1306 PRs/second ≈ 1 PR every 7.66 seconds
+	// Using 0.125 PRs/second (1 PR every 8 seconds) for extra safety
+	// Burst size of 3 allows for some initial rapid processing but prevents spikes
+	rateLimiter := NewRateLimiter(0.125, 3)
+	defer rateLimiter.Close()
 
 	mrs, err := mc.qtx.GetGitlabMergeRequests(ctx, mc.migration.ID)
-
 	if err != nil {
-		logger.Error("failed to get unknown merge requests", "error", err)
+		logger.Error("failed to get merge requests", "error", err)
 		return
 	}
 
-	for _, mr := range mrs {
-		logger.Info(fmt.Sprintf("migrating merge request ID = %d", mr.MrIid))
+	logger.Info("starting PR migration with rate limiting", 
+		"total_mrs", len(mrs),
+		"rate_limit", "470 PRs/hour (1 PR every 8 seconds)",
+		"estimated_duration", fmt.Sprintf("%.1f hours", float64(len(mrs))/58.75)) // 470/8 = 58.75 PRs per hour
+
+	successCount := 0
+	errorCount := 0
+	startTime := time.Now()
+
+	for i, mr := range mrs {
+		// Wait for rate limiter before processing each MR
+		if err := rateLimiter.Wait(ctx); err != nil {
+			logger.Error("rate limiter wait cancelled", "error", err)
+			return
+		}
+
+		logger.Info("migrating merge request", 
+			"mr_iid", mr.MrIid,
+			"progress", fmt.Sprintf("%d/%d", i+1, len(mrs)),
+			"success_count", successCount,
+			"error_count", errorCount)
+
 		mergeRequest, _, err := gl.MergeRequests.GetMergeRequest(mc.gitlabProject.ID, int(mr.MrIid), &gitlab.GetMergeRequestsOptions{})
 		if err != nil {
 			if errors.Is(err, gitlab.ErrNotFound) {
-				logger.Info(fmt.Sprintf("skip non-existing merge request ID = %d", mr.MrIid))
+				logger.Info("skip non-existing merge request", "mr_iid", mr.MrIid)
 				continue
 			} else {
 				sendErr(fmt.Errorf("retrieving gitlab merge request %d: %v", mr.MrIid, err))
-				return
+				errorCount++
+				continue
 			}
 		}
 		if mergeRequest == nil {
 			continue
 		}
+
 		result := migrateSingleMergeRequest(ctx, mc, mergeRequest, &mr)
+		
+		// Track success/failure
+		if result == "success" {
+			successCount++
+		} else {
+			errorCount++
+		}
+
 		err = mc.qtx.UpdateGitlabMergeRequestNotes(ctx, db.UpdateGitlabMergeRequestNotesParams{
 			Notes: result,
 			ID:    mr.ID,
 		})
 		if err != nil {
-			logger.Error(fmt.Sprintf("failed to update merge request: %s", err.Error()), err)
+			logger.Error("failed to update merge request in database", "mr_iid", mr.MrIid, "error", err)
 			continue
 		}
+
+		// Log progress every 10 MRs
+		if (i+1)%10 == 0 {
+			elapsed := time.Since(startTime)
+			avgRate := float64(i+1) / elapsed.Hours()
+			remaining := len(mrs) - (i + 1)
+			estimatedRemaining := time.Duration(float64(remaining)/0.125) * time.Second
+
+			logger.Info("migration progress", 
+				"completed", i+1,
+				"total", len(mrs),
+				"success", successCount,
+				"errors", errorCount,
+				"elapsed", elapsed.Round(time.Second),
+				"avg_rate_per_hour", fmt.Sprintf("%.1f", avgRate),
+				"estimated_remaining", estimatedRemaining.Round(time.Minute))
+		}
 	}
+
+	elapsed := time.Since(startTime)
+	finalRate := float64(len(mrs)) / elapsed.Hours()
+	
+	logger.Info("PR migration completed", 
+		"total_processed", len(mrs),
+		"successful", successCount,
+		"errors", errorCount,
+		"total_time", elapsed.Round(time.Second),
+		"final_rate_per_hour", fmt.Sprintf("%.1f", finalRate))
 }
