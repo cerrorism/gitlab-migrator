@@ -8,6 +8,21 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type GithubAuthToken struct {
+	ID                 int64
+	AuthType           string
+	Token              pgtype.Text
+	AppID              pgtype.Int8
+	InstallationID     pgtype.Int8
+	PrivateKeyFile     pgtype.Text
+	Status             string
+	RateLimitRemaining pgtype.Int4
+	RateLimitReset     pgtype.Timestamp
+	Notes              string
+	CreatedAt          pgtype.Timestamp
+	UpdatedAt          pgtype.Timestamp
+}
+
 type GitlabMergeRequest struct {
 	ID               int64
 	MigrationID      int64

@@ -153,7 +153,7 @@ func migratePullRequests(ctx context.Context, mc *migrationContext) {
 	for i, mr := range mrs {
 		// Wait for rate limiter before processing each MR
 		if err := rateLimiter.Wait(ctx); err != nil {
-			logger.Error("rate limiter wait cancelled", "error", err)
+			logger.Error("rate limiter wait failed", "error", err)
 			return
 		}
 

@@ -19,7 +19,6 @@ const (
 
 var (
 	githubToken string
-	githubUser  string
 	gitlabToken string
 	inMemCache  *objectCache
 	errCount    int
@@ -39,6 +38,7 @@ type migrationContext struct {
 	migration     *db.GitlabToGithubMigration
 	gitlabProject *gitlab.Project
 	qtx           *db.Queries
+	githubAuth    *db.GithubAuthToken
 }
 
 func setupDb(ctx context.Context) {
@@ -67,13 +67,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	prepareAndSetup()
-	ctx := context.Background()
+	ctx, githubAuth := prepareAndSetup()
 	setupDb(ctx)
 	defer func(database *pgx.Conn, ctx context.Context) {
 		_ = database.Close(ctx)
 	}(database, ctx)
 	queries := db.New(database)
+
+	// Release GitHub auth token when program exits
+	defer func() {
+		if githubAuth != nil {
+			if err := queries.ReleaseGithubAuthToken(ctx, githubAuth.ID); err != nil {
+				logger.Error("failed to release GitHub auth token", "token_id", githubAuth.ID, "error", err)
+			} else {
+				logger.Info("released GitHub auth token", "token_id", githubAuth.ID)
+			}
+		}
+	}()
 
 	migration, err := queries.GetGitLabToGithubMigration(ctx)
 	if err != nil {
@@ -81,8 +91,9 @@ func main() {
 		os.Exit(1)
 	}
 	mc := &migrationContext{
-		migration: &migration,
-		qtx:       queries,
+		migration:  &migration,
+		qtx:        queries,
+		githubAuth: githubAuth,
 	}
 
 	// Execute the appropriate operation based on command line arguments

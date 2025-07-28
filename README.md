@@ -73,19 +73,21 @@ gitlab-group/gitlab-project-name,github-org-or-user/github-repo-name
 This tool supports two authentication methods for GitHub:
 
 ### Personal Access Token (PAT)
-```bash
-export GITHUB_TOKEN="ghp_your_personal_access_token"
-export GITLAB_TOKEN="glpat_your_gitlab_token"  
-export GITHUB_USER="your_github_username"
+Add tokens directly to the database:
+```sql
+INSERT INTO github_auth_token (auth_type, token) 
+VALUES ('PAT', 'ghp_your_personal_access_token');
 ```
 
 ### GitHub App Authentication (Recommended for Organizations)
+```sql
+INSERT INTO github_auth_token (auth_type, app_id, installation_id, private_key_file) 
+VALUES ('APP', 123456, 12345678, '/path/to/your/app-private-key.pem');
+```
+
+**Environment Variables:**
 ```bash
-export GITHUB_APP_ID="123456"
-export GITHUB_INSTALLATION_ID="12345678"  
-export GITHUB_PRIVATE_KEY_FILE="/path/to/your/app-private-key.pem"
 export GITLAB_TOKEN="glpat_your_gitlab_token"
-export GITHUB_USER="your_github_username"
 ```
 
 **GitHub App Benefits:**

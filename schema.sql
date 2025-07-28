@@ -21,3 +21,21 @@ CREATE TABLE IF NOT EXISTS gitlab_merge_request (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS github_auth_token (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    auth_type TEXT NOT NULL, -- 'PAT' or 'APP'
+    -- For PAT tokens
+    token TEXT DEFAULT '',
+    -- For GitHub Apps  
+    app_id BIGINT DEFAULT 0,
+    installation_id BIGINT DEFAULT 0,
+    private_key_file TEXT DEFAULT '',
+    -- Common fields
+    status TEXT NOT NULL DEFAULT 'available', -- 'available', 'in_use'
+    rate_limit_remaining INTEGER DEFAULT 5000,
+    rate_limit_reset TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

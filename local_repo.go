@@ -144,8 +144,8 @@ func getMergeRequestInfoFromLocal(ctx context.Context, githubRepoName string) ([
 
 // cloneRepoForAnalysis clones a GitHub repository for commit analysis
 func cloneRepoForAnalysis(ctx context.Context, githubRepoName string) (*git.Repository, error) {
-	cloneURL := fmt.Sprintf("https://%s:%s@github.com/%s",
-		githubUser, githubToken, githubRepoName)
+	cloneURL := fmt.Sprintf("https://x-access-token:%s@github.com/%s",
+		githubToken, githubRepoName)
 
 	// In-memory filesystem for worktree operations
 	fs := memfs.New()

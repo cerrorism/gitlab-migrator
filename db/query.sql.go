@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createGitlabMergeRequest = `-- name: CreateGitlabMergeRequest :one
@@ -72,6 +74,30 @@ func (q *Queries) GetAllGitLabToGithubMigrationIIDs(ctx context.Context, migrati
 	return items, nil
 }
 
+const getAvailableGithubAuthToken = `-- name: GetAvailableGithubAuthToken :one
+UPDATE github_auth_token SET status='in_use', updated_at=CURRENT_TIMESTAMP WHERE id = (SELECT id FROM github_auth_token WHERE status = 'available' ORDER BY rate_limit_remaining DESC, id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id, auth_type, token, app_id, installation_id, private_key_file, status, rate_limit_remaining, rate_limit_reset, notes, created_at, updated_at
+`
+
+func (q *Queries) GetAvailableGithubAuthToken(ctx context.Context) (GithubAuthToken, error) {
+	row := q.db.QueryRow(ctx, getAvailableGithubAuthToken)
+	var i GithubAuthToken
+	err := row.Scan(
+		&i.ID,
+		&i.AuthType,
+		&i.Token,
+		&i.AppID,
+		&i.InstallationID,
+		&i.PrivateKeyFile,
+		&i.Status,
+		&i.RateLimitRemaining,
+		&i.RateLimitReset,
+		&i.Notes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getGitLabToGithubMigration = `-- name: GetGitLabToGithubMigration :one
 SELECT id, gitlab_project_name, github_repo_name, status, notes, created_at, updated_at FROM gitlab_to_github_migration WHERE status = 'ONGOING' order by id FOR UPDATE SKIP LOCKED limit 1
 `
@@ -92,7 +118,7 @@ func (q *Queries) GetGitLabToGithubMigration(ctx context.Context) (GitlabToGithu
 }
 
 const getGitlabMergeRequests = `-- name: GetGitlabMergeRequests :many
-UPDATE gitlab_merge_request SET status='ONGOING' WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = 'MR_FOUND' order by id FOR UPDATE SKIP LOCKED limit 10000) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
+UPDATE gitlab_merge_request SET status='ONGOING' WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = 'MR_FOUND' order by id FOR UPDATE SKIP LOCKED limit 5000) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
 `
 
 func (q *Queries) GetGitlabMergeRequests(ctx context.Context, migrationID int64) ([]GitlabMergeRequest, error) {
@@ -125,6 +151,75 @@ func (q *Queries) GetGitlabMergeRequests(ctx context.Context, migrationID int64)
 		return nil, err
 	}
 	return items, nil
+}
+
+const getGitlabMergeRequestsWithPRCreated = `-- name: GetGitlabMergeRequestsWithPRCreated :many
+UPDATE gitlab_merge_request SET status='ONGOING_DISCUSSION' WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = 'PR_CREATED' order by id FOR UPDATE SKIP LOCKED limit 5000) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
+`
+
+func (q *Queries) GetGitlabMergeRequestsWithPRCreated(ctx context.Context, migrationID int64) ([]GitlabMergeRequest, error) {
+	rows, err := q.db.Query(ctx, getGitlabMergeRequestsWithPRCreated, migrationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GitlabMergeRequest
+	for rows.Next() {
+		var i GitlabMergeRequest
+		if err := rows.Scan(
+			&i.ID,
+			&i.MigrationID,
+			&i.MrIid,
+			&i.MergeCommitSha,
+			&i.Parent1CommitSha,
+			&i.Parent2CommitSha,
+			&i.PrID,
+			&i.Status,
+			&i.Notes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const releaseGithubAuthToken = `-- name: ReleaseGithubAuthToken :exec
+UPDATE github_auth_token SET status='available', updated_at=CURRENT_TIMESTAMP WHERE id = $1
+`
+
+func (q *Queries) ReleaseGithubAuthToken(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, releaseGithubAuthToken, id)
+	return err
+}
+
+const updateGithubAuthTokenRateLimit = `-- name: UpdateGithubAuthTokenRateLimit :exec
+UPDATE github_auth_token SET rate_limit_remaining = $1, rate_limit_reset = $2, updated_at=CURRENT_TIMESTAMP WHERE id = $3
+`
+
+type UpdateGithubAuthTokenRateLimitParams struct {
+	RateLimitRemaining pgtype.Int4
+	RateLimitReset     pgtype.Timestamp
+	ID                 int64
+}
+
+func (q *Queries) UpdateGithubAuthTokenRateLimit(ctx context.Context, arg UpdateGithubAuthTokenRateLimitParams) error {
+	_, err := q.db.Exec(ctx, updateGithubAuthTokenRateLimit, arg.RateLimitRemaining, arg.RateLimitReset, arg.ID)
+	return err
+}
+
+const updateGitlabMergeRequestMarkDiscussionDone = `-- name: UpdateGitlabMergeRequestMarkDiscussionDone :exec
+UPDATE gitlab_merge_request SET status = 'PR_DISCUSSION_CREATED' WHERE id = $1
+`
+
+func (q *Queries) UpdateGitlabMergeRequestMarkDiscussionDone(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, updateGitlabMergeRequestMarkDiscussionDone, id)
+	return err
 }
 
 const updateGitlabMergeRequestNotes = `-- name: UpdateGitlabMergeRequestNotes :exec

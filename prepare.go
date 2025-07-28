@@ -7,7 +7,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +15,8 @@ import (
 	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-retryablehttp"
+	"github.com/jackc/pgx/v5"
+	"github.com/manicminer/gitlab-migrator/db"
 	"github.com/xanzy/go-gitlab"
 )
 
@@ -140,28 +141,11 @@ func logAPIResponse(resp *http.Response, err error, isRetry bool) {
 	logger.Log(logLevel, "API request failed", logArgs...)
 }
 
-func prepareAndSetup() context.Context {
+func prepareAndSetup() (context.Context, *db.GithubAuthToken) {
 	var err error
 
 	// Bypass pre-emptive rate limit checks in the GitHub client, as we will handle these via go-retryablehttp
-	valueCtx := context.WithValue(context.Background(), github.BypassRateLimitCheck, true)
-
-	// Assign a Done channel so we can abort on Ctrl-c
-	ctx, cancel := context.WithCancel(valueCtx)
-
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	defer func() {
-		signal.Stop(c)
-		cancel()
-	}()
-	go func() {
-		select {
-		case <-c:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
+	ctx := context.WithValue(context.Background(), github.BypassRateLimitCheck, true)
 
 	logger = hclog.New(&hclog.LoggerOptions{
 		Name:  "gitlab-migrator",
@@ -170,18 +154,9 @@ func prepareAndSetup() context.Context {
 
 	inMemCache = newObjectCache()
 
-	githubToken = os.Getenv("GITHUB_TOKEN")
-	// Note: GITHUB_TOKEN is now optional, will fall back to GitHub App auth if not provided
-
 	gitlabToken = os.Getenv("GITLAB_TOKEN")
 	if gitlabToken == "" {
 		logger.Error("missing environment variable", "name", "GITLAB_TOKEN")
-		os.Exit(1)
-	}
-
-	githubUser = os.Getenv("GITHUB_USER")
-	if githubUser == "" {
-		logger.Error("missing environment variable", "name", "GITHUB_USER")
 		os.Exit(1)
 	}
 
@@ -305,32 +280,84 @@ func prepareAndSetup() context.Context {
 		return false, nil
 	}
 
-	// Create GitHub client with either PAT or App authentication
-	if githubToken != "" {
+		// Connect to database to select an available GitHub auth token
+	dbString := "user=postgres password=password dbname=postgres sslmode=false"
+	dbConn, err := pgx.Connect(ctx, dbString)
+	if err != nil {
+		logger.Error("failed to connect to database for token selection", "error", err)
+		os.Exit(1)
+	}
+	defer dbConn.Close(ctx)
+
+	queries := db.New(dbConn)
+	
+	// Select an available GitHub auth token
+	githubAuthToken, err := queries.GetAvailableGithubAuthToken(ctx)
+	if err != nil {
+		logger.Error("failed to acquire GitHub auth token", "error", err)
+		logger.Info("make sure you have GitHub auth tokens configured in the github_auth_token table")
+		logger.Info("example SQL to add a PAT token:")
+		logger.Info("  INSERT INTO github_auth_token (auth_type, token) VALUES ('PAT', 'ghp_your_token');")
+		logger.Info("example SQL to add a GitHub App:")
+		logger.Info("  INSERT INTO github_auth_token (auth_type, app_id, installation_id, private_key_file) VALUES ('APP', 123456, 12345678, '/path/to/key.pem');")
+		os.Exit(1)
+	}
+
+	logger.Info("acquired GitHub auth token", 
+		"token_id", githubAuthToken.ID,
+		"auth_type", githubAuthToken.AuthType,
+		"rate_limit_remaining", githubAuthToken.RateLimitRemaining.Int32)
+
+	// Create GitHub client based on auth token type
+	if githubAuthToken.AuthType == "PAT" {
 		// Use Personal Access Token authentication
-		logger.Info("using GitHub Personal Access Token authentication")
-		gh = createGithubClientWithPAT(retryClient, githubToken)
-	} else {
-		// Try GitHub App authentication
-		logger.Info("GitHub token not found, attempting GitHub App authentication")
-		appConfig, configErr := parseGitHubAppConfigFromEnv()
-		if configErr != nil {
-			logger.Error("failed to parse GitHub App configuration", "error", configErr)
-			logger.Info("required environment variables for GitHub App auth:")
-			logger.Info("  GITHUB_APP_ID - your GitHub App ID")
-			logger.Info("  GITHUB_INSTALLATION_ID - installation ID for your app")
-			logger.Info("  GITHUB_PRIVATE_KEY_FILE - path to your app's private key file")
+		if !githubAuthToken.Token.Valid {
+			logger.Error("PAT token missing required fields", "token_id", githubAuthToken.ID)
 			os.Exit(1)
+		}
+		
+		githubToken = githubAuthToken.Token.String
+		
+		logger.Info("using GitHub Personal Access Token authentication", "token_id", githubAuthToken.ID)
+		gh = createGithubClientWithPAT(retryClient, githubToken)
+		
+	} else if githubAuthToken.AuthType == "APP" {
+		// Use GitHub App authentication
+		if !githubAuthToken.AppID.Valid || !githubAuthToken.InstallationID.Valid || !githubAuthToken.PrivateKeyFile.Valid {
+			logger.Error("GitHub App token missing required fields", "token_id", githubAuthToken.ID)
+			os.Exit(1)
+		}
+
+		appConfig := GitHubAppConfig{
+			AppID:          githubAuthToken.AppID.Int64,
+			InstallationID: githubAuthToken.InstallationID.Int64,
+			PrivateKeyFile: githubAuthToken.PrivateKeyFile.String,
 		}
 
 		gh, err = createGithubClientWithApp(retryClient, appConfig)
 		if err != nil {
-			logger.Error("failed to create GitHub App client", "error", err)
+			logger.Error("failed to create GitHub App client", "error", err, "token_id", githubAuthToken.ID)
 			os.Exit(1)
 		}
-		logger.Info("successfully configured GitHub App authentication",
+		
+		// Get installation access token for git operations
+		tempTransport, err := NewAppAuthTransport(appConfig, &retryablehttp.RoundTripper{Client: retryClient})
+		if err != nil {
+			logger.Error("failed to create temp transport for git token", "error", err, "token_id", githubAuthToken.ID)
+			os.Exit(1)
+		}
+		
+		// Extract the access token for git cloning
+		tempTransport.mu.RLock()
+		githubToken = tempTransport.accessToken
+		tempTransport.mu.RUnlock()
+		
+		logger.Info("successfully configured GitHub App authentication", 
 			"app_id", appConfig.AppID,
 			"installation_id", appConfig.InstallationID)
+	} else {
+		logger.Error("unsupported GitHub auth type", "auth_type", githubAuthToken.AuthType, "token_id", githubAuthToken.ID)
+		os.Exit(1)
 	}
 
 	gitlabOpts := make([]gitlab.ClientOptionFunc, 0)
@@ -339,5 +366,5 @@ func prepareAndSetup() context.Context {
 		os.Exit(1)
 	}
 
-	return ctx
+	return ctx, &githubAuthToken
 }
