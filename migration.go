@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
+
 	"github.com/manicminer/gitlab-migrator/db"
 	"github.com/xanzy/go-gitlab"
-	"slices"
 )
 
 // RateLimiter implements a leaky bucket rate limiter
@@ -59,7 +60,7 @@ func (rl *RateLimiter) Wait(ctx context.Context) error {
 // refill adds tokens to the bucket at the specified rate
 func (rl *RateLimiter) refill() {
 	defer rl.ticker.Stop()
-	
+
 	for {
 		select {
 		case <-rl.ticker.C:
@@ -81,6 +82,16 @@ func (rl *RateLimiter) Close() {
 		close(rl.done)
 	})
 }
+
+const (
+	MergeRequestStatusMRFound             = "MR_FOUND"
+	MergeRequestStatusPRCreatedOngoing    = "PR_CREATE_ONGOING"
+	MergeRequestStatusPRCreated           = "PR_CREATED"
+	MergeRequestStatusPRDiscussionOngoing = "PR_DISCUSSION_ONGOING"
+	MergeRequestStatusPRDiscussionCreated = "PR_DISCUSSION_CREATED"
+	MergeRequestStatusReleaseOngoing      = "RELEASE_ONGOING"
+	MergeRequestStatusReleaseCreated      = "RELEASE_CREATED"
+)
 
 func updateStoredMergeRequests(ctx context.Context, mc *migrationContext) error {
 	existingMergeRequestIIDs, err := mc.qtx.GetAllGitLabToGithubMigrationIIDs(ctx, mc.migration.ID)
@@ -111,7 +122,7 @@ func updateStoredMergeRequests(ctx context.Context, mc *migrationContext) error 
 	return nil
 }
 
-func migrateProject(ctx context.Context, mc *migrationContext) error {
+func migrateProject(ctx context.Context, mc *migrationContext, step string) error {
 	project, _, err := gl.Projects.GetProject(mc.migration.GitlabProjectName, &gitlab.GetProjectOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get gitlab project: %v", err)
@@ -122,12 +133,12 @@ func migrateProject(ctx context.Context, mc *migrationContext) error {
 	}
 	mc.gitlabProject = project
 
-	migratePullRequests(ctx, mc)
+	migratePullRequests(ctx, mc, step)
 
 	return nil
 }
 
-func migratePullRequests(ctx context.Context, mc *migrationContext) {
+func migratePullRequests(ctx context.Context, mc *migrationContext, step string) {
 	// Create rate limiter for 470 PRs/hour with smooth distribution
 	// 470 PRs/hour = 0.1306 PRs/second ≈ 1 PR every 7.66 seconds
 	// Using 0.125 PRs/second (1 PR every 8 seconds) for extra safety
@@ -135,16 +146,47 @@ func migratePullRequests(ctx context.Context, mc *migrationContext) {
 	rateLimiter := NewRateLimiter(0.125, 3)
 	defer rateLimiter.Close()
 
-	mrs, err := mc.qtx.GetGitlabMergeRequests(ctx, mc.migration.ID)
+	// Determine operation description based on step
+	var operationDesc string
+	var sourceStatus string
+	var middleStatus string
+	var targetStatus string
+	switch step {
+	case "migrate-mrs":
+		operationDesc = "PR migration"
+		sourceStatus = MergeRequestStatusMRFound
+		middleStatus = MergeRequestStatusPRCreatedOngoing
+		targetStatus = MergeRequestStatusPRCreated
+	case "migrate-discussions":
+		operationDesc = "discussion migration"
+		sourceStatus = MergeRequestStatusPRCreated
+		middleStatus = MergeRequestStatusPRDiscussionOngoing
+		targetStatus = MergeRequestStatusPRDiscussionCreated
+	case "migrate-releases":
+		operationDesc = "release creation"
+		sourceStatus = MergeRequestStatusPRDiscussionCreated
+		middleStatus = MergeRequestStatusReleaseOngoing
+		targetStatus = MergeRequestStatusReleaseCreated
+	default:
+		operationDesc = "migration"
+	}
+
+	mrs, err := mc.qtx.GetGitlabMergeRequests(ctx, db.GetGitlabMergeRequestsParams{
+		MigrationID: mc.migration.ID,
+		Limit:       merge_request_limit,
+		FromState:   sourceStatus,
+		ToState:     middleStatus,
+	})
 	if err != nil {
 		logger.Error("failed to get merge requests", "error", err)
 		return
 	}
 
-	logger.Info("starting PR migration with rate limiting", 
+	logger.Info(fmt.Sprintf("starting %s with rate limiting", operationDesc),
 		"total_mrs", len(mrs),
-		"rate_limit", "470 PRs/hour (1 PR every 8 seconds)",
-		"estimated_duration", fmt.Sprintf("%.1f hours", float64(len(mrs))/58.75)) // 470/8 = 58.75 PRs per hour
+		"step", step,
+		"rate_limit", "470 operations/hour (1 operation every 8 seconds)",
+		"estimated_duration", fmt.Sprintf("%.1f hours", float64(len(mrs))/58.75)) // 470/8 = 58.75 operations per hour
 
 	successCount := 0
 	errorCount := 0
@@ -157,11 +199,12 @@ func migratePullRequests(ctx context.Context, mc *migrationContext) {
 			return
 		}
 
-		logger.Info("migrating merge request", 
+		logger.Info(fmt.Sprintf("processing merge request for %s", operationDesc),
 			"mr_iid", mr.MrIid,
 			"progress", fmt.Sprintf("%d/%d", i+1, len(mrs)),
 			"success_count", successCount,
-			"error_count", errorCount)
+			"error_count", errorCount,
+			"step", step)
 
 		mergeRequest, _, err := gl.MergeRequests.GetMergeRequest(mc.gitlabProject.ID, int(mr.MrIid), &gitlab.GetMergeRequestsOptions{})
 		if err != nil {
@@ -178,12 +221,41 @@ func migratePullRequests(ctx context.Context, mc *migrationContext) {
 			continue
 		}
 
-		result := migrateSingleMergeRequest(ctx, mc, mergeRequest, &mr)
-		
+		// Execute the appropriate function based on step
+		var result string
+		switch step {
+		case "migrate-mrs":
+			result = migrateSingleMergeRequest(ctx, mc, mergeRequest, &mr)
+		case "migrate-discussions":
+			err := migrateComments(ctx, mc, mergeRequest, &mr)
+			if err != nil {
+				result = fmt.Sprintf("failed: %s", err.Error())
+			} else {
+				result = "success"
+			}
+		case "migrate-releases":
+			err := createReleaseForMergeRequest(ctx, mc, mergeRequest, &mr)
+			if err != nil {
+				result = fmt.Sprintf("failed: %s", err.Error())
+			} else {
+				result = "success"
+			}
+		default:
+			result = "failed: unknown step"
+		}
+
 		// Track success/failure
 		if result == "success" {
+			mc.qtx.UpdateGitlabMergeRequestStatus(ctx, db.UpdateGitlabMergeRequestStatusParams{
+				ID:     mr.ID,
+				Status: targetStatus,
+			})
 			successCount++
 		} else {
+			mc.qtx.UpdateGitlabMergeRequestStatus(ctx, db.UpdateGitlabMergeRequestStatusParams{
+				ID:     mr.ID,
+				Status: targetStatus + "_FAILED",
+			})
 			errorCount++
 		}
 
@@ -203,24 +275,26 @@ func migratePullRequests(ctx context.Context, mc *migrationContext) {
 			remaining := len(mrs) - (i + 1)
 			estimatedRemaining := time.Duration(float64(remaining)/0.125) * time.Second
 
-			logger.Info("migration progress", 
+			logger.Info("migration progress",
 				"completed", i+1,
 				"total", len(mrs),
 				"success", successCount,
 				"errors", errorCount,
 				"elapsed", elapsed.Round(time.Second),
 				"avg_rate_per_hour", fmt.Sprintf("%.1f", avgRate),
-				"estimated_remaining", estimatedRemaining.Round(time.Minute))
+				"estimated_remaining", estimatedRemaining.Round(time.Minute),
+				"step", step)
 		}
 	}
 
 	elapsed := time.Since(startTime)
 	finalRate := float64(len(mrs)) / elapsed.Hours()
-	
-	logger.Info("PR migration completed", 
+
+	logger.Info(fmt.Sprintf("%s completed", operationDesc),
 		"total_processed", len(mrs),
 		"successful", successCount,
 		"errors", errorCount,
 		"total_time", elapsed.Round(time.Second),
-		"final_rate_per_hour", fmt.Sprintf("%.1f", finalRate))
+		"final_rate_per_hour", fmt.Sprintf("%.1f", finalRate),
+		"step", step)
 }

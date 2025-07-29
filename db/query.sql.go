@@ -118,11 +118,23 @@ func (q *Queries) GetGitLabToGithubMigration(ctx context.Context) (GitlabToGithu
 }
 
 const getGitlabMergeRequests = `-- name: GetGitlabMergeRequests :many
-UPDATE gitlab_merge_request SET status='ONGOING' WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = 'MR_FOUND' order by id FOR UPDATE SKIP LOCKED limit 5000) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
+UPDATE gitlab_merge_request SET status=$3 WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = $4 order by id FOR UPDATE SKIP LOCKED limit $2) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
 `
 
-func (q *Queries) GetGitlabMergeRequests(ctx context.Context, migrationID int64) ([]GitlabMergeRequest, error) {
-	rows, err := q.db.Query(ctx, getGitlabMergeRequests, migrationID)
+type GetGitlabMergeRequestsParams struct {
+	MigrationID int64
+	Limit       int32
+	ToState     string
+	FromState   string
+}
+
+func (q *Queries) GetGitlabMergeRequests(ctx context.Context, arg GetGitlabMergeRequestsParams) ([]GitlabMergeRequest, error) {
+	rows, err := q.db.Query(ctx, getGitlabMergeRequests,
+		arg.MigrationID,
+		arg.Limit,
+		arg.ToState,
+		arg.FromState,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -213,15 +225,6 @@ func (q *Queries) UpdateGithubAuthTokenRateLimit(ctx context.Context, arg Update
 	return err
 }
 
-const updateGitlabMergeRequestMarkDiscussionDone = `-- name: UpdateGitlabMergeRequestMarkDiscussionDone :exec
-UPDATE gitlab_merge_request SET status = 'PR_DISCUSSION_CREATED' WHERE id = $1
-`
-
-func (q *Queries) UpdateGitlabMergeRequestMarkDiscussionDone(ctx context.Context, id int64) error {
-	_, err := q.db.Exec(ctx, updateGitlabMergeRequestMarkDiscussionDone, id)
-	return err
-}
-
 const updateGitlabMergeRequestNotes = `-- name: UpdateGitlabMergeRequestNotes :exec
 UPDATE gitlab_merge_request SET notes = $1 WHERE id = $2
 `
@@ -247,5 +250,19 @@ type UpdateGitlabMergeRequestPRIDParams struct {
 
 func (q *Queries) UpdateGitlabMergeRequestPRID(ctx context.Context, arg UpdateGitlabMergeRequestPRIDParams) error {
 	_, err := q.db.Exec(ctx, updateGitlabMergeRequestPRID, arg.PrID, arg.ID)
+	return err
+}
+
+const updateGitlabMergeRequestStatus = `-- name: UpdateGitlabMergeRequestStatus :exec
+UPDATE gitlab_merge_request SET status = $2 WHERE id = $1
+`
+
+type UpdateGitlabMergeRequestStatusParams struct {
+	ID     int64
+	Status string
+}
+
+func (q *Queries) UpdateGitlabMergeRequestStatus(ctx context.Context, arg UpdateGitlabMergeRequestStatusParams) error {
+	_, err := q.db.Exec(ctx, updateGitlabMergeRequestStatus, arg.ID, arg.Status)
 	return err
 }

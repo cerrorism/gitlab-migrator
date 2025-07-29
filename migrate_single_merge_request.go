@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/manicminer/gitlab-migrator/db"
 	"slices"
 	"strings"
+
+	"github.com/manicminer/gitlab-migrator/db"
 
 	"github.com/google/go-github/v69/github"
 	"github.com/xanzy/go-gitlab"
@@ -14,18 +15,34 @@ import (
 
 // createGitHubRef creates a GitHub ref (branch) pointing to a specific commit SHA
 func createGitHubRef(ctx context.Context, owner, repo, refName, commitSHA string) error {
-	fullRefName := "refs/heads/" + refName
+	return createGitHubRefWithType(ctx, owner, repo, refName, commitSHA, "heads")
+}
+
+// createGitHubTag creates a GitHub tag pointing to a specific commit SHA
+func createGitHubTag(ctx context.Context, owner, repo, tagName, commitSHA string) error {
+	return createGitHubRefWithType(ctx, owner, repo, tagName, commitSHA, "tags")
+}
+
+// createGitHubRefWithType creates a GitHub ref of the specified type pointing to a specific commit SHA
+func createGitHubRefWithType(ctx context.Context, owner, repo, refName, commitSHA, refType string) error {
+	fullRefName := "refs/" + refType + "/" + refName
 
 	// Check if ref already exists
-	existingRef, _, err := gh.Git.GetRef(ctx, owner, repo, "heads/"+refName)
+	existingRef, _, err := gh.Git.GetRef(ctx, owner, repo, refType+"/"+refName)
 	if err == nil {
 		// Ref exists, check if it points to the correct commit
 		if existingRef.Object.GetSHA() == commitSHA {
-			logger.Info("ref already points to correct commit", "ref", refName, "sha", commitSHA)
+			logger.Info("ref already points to correct commit", "ref", refName, "type", refType, "sha", commitSHA)
 			return nil
 		}
 
-		// Update existing ref to point to new commit
+		// For tags, we don't update existing ones, just skip
+		if refType == "tags" {
+			logger.Info("tag already exists, skipping", "tag", refName)
+			return nil
+		}
+
+		// Update existing ref to point to new commit (only for branches)
 		_, _, err = gh.Git.UpdateRef(ctx, owner, repo, &github.Reference{
 			Ref: &fullRefName,
 			Object: &github.GitObject{
@@ -35,7 +52,7 @@ func createGitHubRef(ctx context.Context, owner, repo, refName, commitSHA string
 		if err != nil {
 			return fmt.Errorf("updating existing ref %s: %v", refName, err)
 		}
-		logger.Info("updated existing ref", "ref", refName, "sha", commitSHA)
+		logger.Info("updated existing ref", "ref", refName, "type", refType, "sha", commitSHA)
 		return nil
 	}
 
@@ -50,7 +67,7 @@ func createGitHubRef(ctx context.Context, owner, repo, refName, commitSHA string
 		return fmt.Errorf("creating ref %s: %v", refName, err)
 	}
 
-	logger.Info("created new ref", "ref", refName, "sha", commitSHA)
+	logger.Info("created new ref", "ref", refName, "type", refType, "sha", commitSHA)
 	return nil
 }
 
@@ -62,6 +79,148 @@ func deleteGitHubRef(ctx context.Context, owner, repo, refName string) error {
 	}
 	logger.Info("deleted ref", "ref", refName)
 	return nil
+}
+
+// createReleaseForMergeRequest creates a GitHub release for a migrated merge request
+func createReleaseForMergeRequest(ctx context.Context, mc *migrationContext, mergeRequest *gitlab.MergeRequest, mrInDB *db.GitlabMergeRequest) error {
+	githubPath := strings.Split(mc.migration.GithubRepoName, "/")
+	if len(githubPath) != 2 {
+		return fmt.Errorf("invalid github repo name format: %s", mc.migration.GithubRepoName)
+	}
+	owner, repoName := githubPath[0], githubPath[1]
+
+	// Create tag name
+	tagName := fmt.Sprintf("GitLab_MR_%d", mergeRequest.IID)
+
+	logger.Info("creating release for merge request",
+		"mr_iid", mergeRequest.IID,
+		"tag", tagName,
+		"commit_sha", mrInDB.MergeCommitSha)
+
+	// Create tag using the reusable createGitHubTag function
+	err := createGitHubTag(ctx, owner, repoName, tagName, mrInDB.MergeCommitSha)
+	if err != nil {
+		return fmt.Errorf("creating tag: %v", err)
+	}
+
+	// Get all commits between base and head parents
+	commitsList, err := getCommitsBetweenParents(ctx, owner, repoName, mrInDB.Parent1CommitSha, mrInDB.Parent2CommitSha)
+	if err != nil {
+		logger.Warn("failed to get commits between parents, continuing without commit list",
+			"error", err, "base", mrInDB.Parent1CommitSha, "head", mrInDB.Parent2CommitSha)
+		commitsList = []string{} // Continue with empty list
+	}
+
+	// Build release body with MR information
+	gitlabPath := strings.Split(mc.migration.GitlabProjectName, "/")
+
+	// Format merge request state information
+	stateInfo := ""
+	if mergeRequest.State == "merged" && mergeRequest.MergedAt != nil {
+		stateInfo = fmt.Sprintf("**Status:** Merged on %s\n\n", mergeRequest.MergedAt.Format(dateFormat))
+	} else if mergeRequest.State == "closed" && mergeRequest.ClosedAt != nil {
+		stateInfo = fmt.Sprintf("**Status:** Closed on %s\n\n", mergeRequest.ClosedAt.Format(dateFormat))
+	} else {
+		stateInfo = fmt.Sprintf("**Status:** %s\n\n", strings.Title(mergeRequest.State))
+	}
+
+	// Get author information
+	githubAuthorName := mergeRequest.Author.Name
+	author, err := getGitlabUser(mergeRequest.Author.Username)
+	if err == nil && author.WebsiteURL != "" {
+		githubAuthorName = "@" + strings.TrimPrefix(strings.ToLower(author.WebsiteURL), "https://github.com/")
+	}
+
+	// Format commits list
+	commitsInfo := ""
+	if len(commitsList) > 0 {
+		commitsInfo = "\n## Commits Included\n\n"
+		for i, commitSHA := range commitsList {
+			if i < 10 { // Limit to first 10 commits to avoid overly long release notes
+				commitsInfo += fmt.Sprintf("- [`%s`](https://github.com/%s/commit/%s)\n", commitSHA[:8], mc.migration.GithubRepoName, commitSHA)
+			} else if i == 10 {
+				commitsInfo += fmt.Sprintf("- ... and %d more commits\n", len(commitsList)-10)
+				break
+			}
+		}
+		commitsInfo += fmt.Sprintf("\n**Total commits:** %d\n", len(commitsList))
+	}
+
+	releaseBody := fmt.Sprintf(`# GitLab Merge Request %d
+
+%s**Original Author:** %s
+
+**Original GitLab Link:** [%s/%s!%d](https://%s/%s/%s/-/merge_requests/%d)
+
+**GitHub Pull Request:** [#%d](https://github.com/%s/pull/%d)
+
+## Merge Information
+
+- **Merge Commit:** [%s](https://github.com/%s/commit/%s)
+- **Target Branch:** %s
+- **Source Branch:** [%s](https://github.com/%s/commit/%s)%s
+
+---
+
+> This release was automatically created during GitLab to GitHub migration to preserve merge request history.
+`,
+		mergeRequest.IID,
+		stateInfo,
+		githubAuthorName,
+		gitlabPath[0], gitlabPath[1], mergeRequest.IID,
+		"gitlab.com", gitlabPath[0], gitlabPath[1], mergeRequest.IID,
+		mrInDB.PrID, mc.migration.GithubRepoName, mrInDB.PrID,
+		mrInDB.MergeCommitSha[:8], mc.migration.GithubRepoName, mrInDB.MergeCommitSha,
+		mergeRequest.TargetBranch,
+		mrInDB.Parent2CommitSha[:8], mc.migration.GithubRepoName, mrInDB.Parent2CommitSha,
+		commitsInfo)
+
+	// Create release
+	releaseName := fmt.Sprintf("GitLab MR %d: %s", mergeRequest.IID, mergeRequest.Title)
+	if len(releaseName) > 100 {
+		// Truncate title if too long
+		maxTitleLen := 100 - len(fmt.Sprintf("GitLab MR %d: ", mergeRequest.IID)) - 3
+		releaseName = fmt.Sprintf("GitLab MR %d: %s...", mergeRequest.IID, mergeRequest.Title[:maxTitleLen])
+	}
+
+	release := &github.RepositoryRelease{
+		TagName:    &tagName,
+		Name:       &releaseName,
+		Body:       &releaseBody,
+		Draft:      pointer(false),
+		Prerelease: pointer(true), // Mark as prerelease since these are MR releases
+	}
+
+	createdRelease, _, err := gh.Repositories.CreateRelease(ctx, owner, repoName, release)
+	if err != nil {
+		return fmt.Errorf("creating release: %v", err)
+	}
+
+	logger.Info("successfully created release for merge request",
+		"mr_iid", mergeRequest.IID,
+		"tag", tagName,
+		"release_id", createdRelease.GetID(),
+		"pr_id", mrInDB.PrID)
+
+	return nil
+}
+
+// getCommitsBetweenParents gets all commit SHAs between base and head parents
+func getCommitsBetweenParents(ctx context.Context, owner, repo, baseSHA, headSHA string) ([]string, error) {
+	// Use GitHub's compare API to get commits between base and head
+	comparison, _, err := gh.Repositories.CompareCommits(ctx, owner, repo, baseSHA, headSHA, &github.ListOptions{PerPage: 100})
+	if err != nil {
+		return nil, fmt.Errorf("comparing commits: %v", err)
+	}
+
+	commits := make([]string, 0, len(comparison.Commits))
+	for _, commit := range comparison.Commits {
+		if commit.SHA != nil {
+			commits = append(commits, *commit.SHA)
+		}
+	}
+
+	return commits, nil
 }
 
 // migrateComments migrates comments from a GitLab merge request to a GitHub pull request

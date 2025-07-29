@@ -8,7 +8,7 @@ SELECT mr_iid FROM gitlab_merge_request WHERE migration_id = $1;
 INSERT INTO gitlab_merge_request (migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *;
 
 -- name: GetGitlabMergeRequests :many
-UPDATE gitlab_merge_request SET status='ONGOING' WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = 'MR_FOUND' order by id FOR UPDATE SKIP LOCKED limit 5000) RETURNING *;
+UPDATE gitlab_merge_request SET status=sqlc.arg(to_state) WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = sqlc.arg(from_state) order by id FOR UPDATE SKIP LOCKED limit $2) RETURNING *;
 
 -- name: GetGitlabMergeRequestsWithPRCreated :many
 UPDATE gitlab_merge_request SET status='ONGOING_DISCUSSION' WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = 'PR_CREATED' order by id FOR UPDATE SKIP LOCKED limit 5000) RETURNING *;
@@ -16,8 +16,8 @@ UPDATE gitlab_merge_request SET status='ONGOING_DISCUSSION' WHERE id in (SELECT 
 -- name: UpdateGitlabMergeRequestPRID :exec
 UPDATE gitlab_merge_request SET pr_id = $1, status='PR_CREATED' WHERE id = $2;
 
--- name: UpdateGitlabMergeRequestMarkDiscussionDone :exec
-UPDATE gitlab_merge_request SET status = 'PR_DISCUSSION_CREATED' WHERE id = $1;
+-- name: UpdateGitlabMergeRequestStatus :exec
+UPDATE gitlab_merge_request SET status = $2 WHERE id = $1;
 
 -- name: UpdateGitlabMergeRequestNotes :exec
 UPDATE gitlab_merge_request SET notes = $1 WHERE id = $2;

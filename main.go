@@ -4,17 +4,19 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
+
 	"github.com/google/go-github/v69/github"
 	"github.com/hashicorp/go-hclog"
 	"github.com/jackc/pgx/v5"
 	"github.com/manicminer/gitlab-migrator/db"
 	"github.com/xanzy/go-gitlab"
-	"os"
 )
 
 const (
-	dateFormat = "Mon, 2 Jan 2006"
-	dbString   = "user=postgres password=password dbname=postgres sslmode=false"
+	dateFormat          = "Mon, 2 Jan 2006"
+	dbString            = "user=postgres password=password dbname=postgres sslmode=false"
+	merge_request_limit = 5
 )
 
 var (
@@ -52,17 +54,21 @@ func setupDb(ctx context.Context) {
 
 func main() {
 	// Parse command line arguments
-	var updateStoredMRs = flag.Bool("update-stored-mrs", false, "update stored merge requests from repository analysis")
-	var migrateMRs = flag.Bool("migrate-mrs", false, "migrate merge requests from GitLab to GitHub")
+	var step = flag.String("step", "", "Migration step: update-stored-mrs, migrate-mrs, migrate-discussions, migrate-releases")
 	flag.Parse()
 
-	// Validate that exactly one operation is specified
-	if *updateStoredMRs == *migrateMRs {
-		if *updateStoredMRs {
-			logger.Error("cannot specify both --update-stored-mrs and --migrate-mrs")
-		} else {
-			logger.Error("must specify either --update-stored-mrs or --migrate-mrs")
+	// Validate step parameter
+	validSteps := []string{"update-stored-mrs", "migrate-mrs", "migrate-discussions", "migrate-releases"}
+	isValidStep := false
+	for _, validStep := range validSteps {
+		if *step == validStep {
+			isValidStep = true
+			break
 		}
+	}
+
+	if !isValidStep {
+		logger.Error("invalid step specified", "step", *step, "valid_steps", validSteps)
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -96,21 +102,36 @@ func main() {
 		githubAuth: githubAuth,
 	}
 
-	// Execute the appropriate operation based on command line arguments
-	if *updateStoredMRs {
+	// Execute the appropriate operation based on step parameter
+	switch *step {
+	case "update-stored-mrs":
 		logger.Info("updating stored merge requests from repository analysis")
 		if err = updateStoredMergeRequests(ctx, mc); err != nil {
 			sendErr(err)
 			os.Exit(1)
 		}
 		logger.Info("successfully updated stored merge requests")
-	} else if *migrateMRs {
+	case "migrate-mrs":
 		logger.Info("starting merge request migration from GitLab to GitHub")
-		if err = migrateProject(ctx, mc); err != nil {
+		if err = migrateProject(ctx, mc, *step); err != nil {
 			sendErr(err)
 			os.Exit(1)
 		}
 		logger.Info("successfully completed merge request migration")
+	case "migrate-discussions":
+		logger.Info("starting discussion migration from GitLab to GitHub")
+		if err = migrateProject(ctx, mc, *step); err != nil {
+			sendErr(err)
+			os.Exit(1)
+		}
+		logger.Info("successfully completed discussion migration")
+	case "migrate-releases":
+		logger.Info("starting release creation for merge requests")
+		if err = migrateProject(ctx, mc, *step); err != nil {
+			sendErr(err)
+			os.Exit(1)
+		}
+		logger.Info("successfully completed release creation")
 	}
 
 	if errCount > 0 {
