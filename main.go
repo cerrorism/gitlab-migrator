@@ -16,7 +16,7 @@ import (
 const (
 	dateFormat          = "Mon, 2 Jan 2006"
 	dbString            = "user=postgres password=password dbname=postgres sslmode=false"
-	merge_request_limit = 5
+	merge_request_limit = 10000
 )
 
 var (
@@ -34,6 +34,58 @@ var (
 func sendErr(err error) {
 	errCount++
 	logger.Error(err.Error())
+}
+
+// Enhanced error function that also stores errors in the database
+func recordError(ctx context.Context, qtx *db.Queries, mergeRequestID int64, err error) {
+	errCount++
+	logger.Error(err.Error())
+
+	// Store error in database
+	if qtx != nil && mergeRequestID > 0 {
+		_, dbErr := qtx.CreateMergeRequestNote(ctx, db.CreateMergeRequestNoteParams{
+			MergeRequestID: mergeRequestID,
+			NoteType:       "error",
+			Message:        err.Error(),
+		})
+		if dbErr != nil {
+			logger.Error("failed to store error in database", "db_error", dbErr.Error(), "original_error", err.Error())
+		}
+	}
+}
+
+// Enhanced info function for storing informational notes
+func recordInfo(ctx context.Context, qtx *db.Queries, mergeRequestID int64, message string) {
+	logger.Info(message)
+
+	// Store info in database
+	if qtx != nil && mergeRequestID > 0 {
+		_, dbErr := qtx.CreateMergeRequestNote(ctx, db.CreateMergeRequestNoteParams{
+			MergeRequestID: mergeRequestID,
+			NoteType:       "info",
+			Message:        message,
+		})
+		if dbErr != nil {
+			logger.Error("failed to store info in database", "db_error", dbErr.Error(), "message", message)
+		}
+	}
+}
+
+// Enhanced warning function for storing warnings
+func recordWarning(ctx context.Context, qtx *db.Queries, mergeRequestID int64, message string) {
+	logger.Warn(message)
+
+	// Store warning in database
+	if qtx != nil && mergeRequestID > 0 {
+		_, dbErr := qtx.CreateMergeRequestNote(ctx, db.CreateMergeRequestNoteParams{
+			MergeRequestID: mergeRequestID,
+			NoteType:       "warning",
+			Message:        message,
+		})
+		if dbErr != nil {
+			logger.Error("failed to store warning in database", "db_error", dbErr.Error(), "message", message)
+		}
+	}
 }
 
 type migrationContext struct {

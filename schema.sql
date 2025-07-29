@@ -22,6 +22,14 @@ CREATE TABLE IF NOT EXISTS gitlab_merge_request (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS gitlab_merge_request_note (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    merge_request_id BIGINT NOT NULL REFERENCES gitlab_merge_request(id),
+    note_type TEXT NOT NULL DEFAULT 'info', -- 'error', 'warning', 'info', 'success'
+    message TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS github_auth_token (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     auth_type TEXT NOT NULL, -- 'PAT' or 'APP'

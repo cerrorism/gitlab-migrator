@@ -26,37 +26,8 @@ func createGitHubTag(ctx context.Context, owner, repo, tagName, commitSHA string
 func createGitHubRefWithType(ctx context.Context, owner, repo, refName, commitSHA, refType string) error {
 	fullRefName := "refs/" + refType + "/" + refName
 
-	// Check if ref already exists
-	existingRef, _, err := gh.Git.GetRef(ctx, owner, repo, refType+"/"+refName)
-	if err == nil {
-		// Ref exists, check if it points to the correct commit
-		if existingRef.Object.GetSHA() == commitSHA {
-			logger.Info("ref already points to correct commit", "ref", refName, "type", refType, "sha", commitSHA)
-			return nil
-		}
-
-		// For tags, we don't update existing ones, just skip
-		if refType == "tags" {
-			logger.Info("tag already exists, skipping", "tag", refName)
-			return nil
-		}
-
-		// Update existing ref to point to new commit (only for branches)
-		_, _, err = gh.Git.UpdateRef(ctx, owner, repo, &github.Reference{
-			Ref: &fullRefName,
-			Object: &github.GitObject{
-				SHA: &commitSHA,
-			},
-		}, false)
-		if err != nil {
-			return fmt.Errorf("updating existing ref %s: %v", refName, err)
-		}
-		logger.Info("updated existing ref", "ref", refName, "type", refType, "sha", commitSHA)
-		return nil
-	}
-
-	// Create new ref
-	_, _, err = gh.Git.CreateRef(ctx, owner, repo, &github.Reference{
+	// Create ref directly (no existence check for speed)
+	_, _, err := gh.Git.CreateRef(ctx, owner, repo, &github.Reference{
 		Ref: &fullRefName,
 		Object: &github.GitObject{
 			SHA: &commitSHA,
@@ -66,7 +37,7 @@ func createGitHubRefWithType(ctx context.Context, owner, repo, refName, commitSH
 		return fmt.Errorf("creating ref %s: %v", refName, err)
 	}
 
-	logger.Info("created new ref", "ref", refName, "type", refType, "sha", commitSHA)
+	logger.Info("created ref", "ref", refName, "type", refType, "sha", commitSHA)
 	return nil
 }
 
@@ -240,7 +211,7 @@ func migrateComments(ctx context.Context, mc *migrationContext, mergeRequest *gi
 	for {
 		result, resp, err := gl.Notes.ListMergeRequestNotes(mc.gitlabProject.ID, mergeRequest.IID, opts)
 		if err != nil {
-			sendErr(fmt.Errorf("listing merge request notes: %v", err))
+			recordError(ctx, mc.qtx, mrInDB.ID, fmt.Errorf("listing merge request notes: %v", err))
 			skipComments = true
 			break
 		}
@@ -257,9 +228,37 @@ func migrateComments(ctx context.Context, mc *migrationContext, mergeRequest *gi
 	prNumber := int(mrInDB.PrID)
 	if !skipComments {
 		logger.Info("retrieving GitHub pull request comments", "owner", owner, "repo", repoName, "pr_number", mrInDB.PrID)
-		prComments, _, err := gh.Issues.ListComments(ctx, owner, repoName, prNumber, &github.IssueListCommentsOptions{Sort: pointer("created"), Direction: pointer("asc")})
+
+		// Check original GitLab MR commits to determine if we can use inline comments
+		gitlabCommits, _, err := gl.MergeRequests.GetMergeRequestCommits(mc.gitlabProject.ID, mergeRequest.IID, &gitlab.GetMergeRequestCommitsOptions{})
+		if err != nil {
+			return fmt.Errorf("listing GitLab merge request commits: %v", err)
+		}
+
+		// Determine if we can use inline comments based on original GitLab MR
+		var inlineCommitSHA string
+		canCreateInlineComments := false
+		if len(gitlabCommits) == 1 {
+			// Single commit in GitLab MR - use the source commit SHA from database
+			inlineCommitSHA = mrInDB.Parent2CommitSha
+			canCreateInlineComments = true
+			logger.Info("GitLab MR had single commit, will use inline comments", "gitlab_commits", len(gitlabCommits), "commit_sha", inlineCommitSHA)
+		} else {
+			logger.Info("GitLab MR had multiple commits, will use PR-level comments only", "gitlab_commits", len(gitlabCommits))
+		}
+
+		// Get existing comments - we need both types now
+		prComments, _, err := gh.Issues.ListComments(ctx, owner, repoName, prNumber, &github.IssueListCommentsOptions{})
 		if err != nil {
 			return fmt.Errorf("listing pull request comments: %v", err)
+		}
+
+		var prReviewComments []*github.PullRequestComment
+		if canCreateInlineComments {
+			prReviewComments, _, err = gh.PullRequests.ListComments(ctx, owner, repoName, prNumber, &github.PullRequestListCommentsOptions{})
+			if err != nil {
+				return fmt.Errorf("listing pull request review comments: %v", err)
+			}
 		}
 
 		logger.Info("migrating merge request comments from GitLab to GitHub", "owner", owner, "repo", repoName, "pr_number", mrInDB.PrID, "count", len(comments))
@@ -273,56 +272,160 @@ func migrateComments(ctx context.Context, mc *migrationContext, mergeRequest *gi
 
 			commentAuthor, err := getGitlabUser(comment.Author.Username)
 			if err != nil {
-				sendErr(fmt.Errorf("retrieving gitlab user: %v", err))
+				recordError(ctx, mc.qtx, mrInDB.ID, fmt.Errorf("retrieving gitlab user: %v", err))
 				break
 			}
 			if commentAuthor.WebsiteURL != "" {
 				githubCommentAuthorName = "@" + strings.TrimPrefix(strings.ToLower(commentAuthor.WebsiteURL), "https://github.com/")
 			}
 
-			commentBody := fmt.Sprintf(`> [!NOTE]
-> This comment was migrated from GitLab
->
-> |      |      |
-> | ---- | ---- |
-> | **Original Author** | %[1]s |
-> | **Note ID** | %[2]d |
-> | **Date Originally Created** | %[3]s |
-> |      |      |
->
+			// Build comment body with comprehensive author information
+			authorInfo := githubCommentAuthorName
+			if comment.Author.Username != "" && githubCommentAuthorName != "@"+comment.Author.Username {
+				// Include original GitLab username if different from GitHub username
+				authorInfo = fmt.Sprintf("%s (GitLab: @%s)", githubCommentAuthorName, comment.Author.Username)
+			}
 
-## Original Comment
+			// Add comment creation date
+			commentDate := ""
+			if comment.CreatedAt != nil {
+				commentDate = fmt.Sprintf(" on %s", comment.CreatedAt.Format("Jan 2, 2006"))
+			}
 
-%[4]s`, githubCommentAuthorName, comment.ID, comment.CreatedAt.Format("Mon, 2 Jan 2006"), comment.Body)
+			var commentBody string
+			isInlineComment := comment.Position != nil && comment.Position.NewPath != ""
+			willCreateInlineComment := isInlineComment && canCreateInlineComments
 
-			foundExistingComment := false
-			for _, prComment := range prComments {
-				if prComment == nil {
-					continue
+			// Check if this is an inline comment (diff note) with position information
+			if isInlineComment {
+				// This is an inline comment on a specific file/line
+				lineInfo := ""
+				if comment.Position.NewLine > 0 {
+					lineInfo = fmt.Sprintf(" (line %d)", comment.Position.NewLine)
+				} else if comment.Position.OldLine > 0 {
+					lineInfo = fmt.Sprintf(" (line %d in old version)", comment.Position.OldLine)
 				}
 
-				if strings.Contains(prComment.GetBody(), fmt.Sprintf("**Note ID** | %d", comment.ID)) {
-					foundExistingComment = true
-
-					if prComment.Body == nil || *prComment.Body != commentBody {
-						logger.Info("updating pull request comment", "owner", owner, "repo", repoName, "pr_number", prNumber, "comment_id", prComment.GetID())
-						prComment.Body = &commentBody
-						if _, _, err = gh.Issues.EditComment(ctx, owner, repoName, prComment.GetID(), prComment); err != nil {
-							return fmt.Errorf("updating pull request comments: %v", err)
-						}
-					}
+				if willCreateInlineComment {
+					// For single-commit GitLab MRs, create true inline comments
+					commentBody = fmt.Sprintf("**%s**%s:\n\n%s", authorInfo, commentDate, comment.Body)
 				} else {
-					logger.Trace("existing pull request comment is up-to-date", "owner", owner, "repo", repoName, "pr_number", prNumber, "comment_id", prComment.GetID())
+					// For multi-commit GitLab MRs, include file/line info in the comment body
+					commentBody = fmt.Sprintf("**%s** commented on `%s`%s%s:\n\n%s",
+						authorInfo, comment.Position.NewPath, lineInfo, commentDate, comment.Body)
+				}
+			} else {
+				// Regular discussion comment
+				commentBody = fmt.Sprintf("**%s**%s:\n\n%s", authorInfo, commentDate, comment.Body)
+			}
+
+			// Create unique identifier for this comment to detect existing ones
+			commentIdentifier := fmt.Sprintf("gitlab-comment-%d", comment.ID)
+
+			foundExistingComment := false
+
+			// Check appropriate comment type for existing ones
+			if willCreateInlineComment {
+				// Check review comments for inline comments
+				for _, prComment := range prReviewComments {
+					if prComment == nil {
+						continue
+					}
+
+					if strings.Contains(prComment.GetBody(), commentIdentifier) {
+						foundExistingComment = true
+
+						if prComment.Body == nil || *prComment.Body != commentBody {
+							logger.Info("updating pull request review comment", "owner", owner, "repo", repoName, "pr_number", prNumber, "comment_id", prComment.GetID())
+							prComment.Body = &commentBody
+							if _, _, err = gh.PullRequests.EditComment(ctx, owner, repoName, prComment.GetID(), prComment); err != nil {
+								return fmt.Errorf("updating pull request review comment: %v", err)
+							}
+						}
+						break
+					}
+				}
+			} else {
+				// Check issue comments for PR-level comments
+				for _, prComment := range prComments {
+					if prComment == nil {
+						continue
+					}
+
+					if strings.Contains(prComment.GetBody(), commentIdentifier) {
+						foundExistingComment = true
+
+						if prComment.Body == nil || *prComment.Body != commentBody {
+							logger.Info("updating pull request comment", "owner", owner, "repo", repoName, "pr_number", prNumber, "comment_id", prComment.GetID())
+							prComment.Body = &commentBody
+							if _, _, err = gh.Issues.EditComment(ctx, owner, repoName, prComment.GetID(), prComment); err != nil {
+								return fmt.Errorf("updating pull request comment: %v", err)
+							}
+						}
+						break
+					}
 				}
 			}
 
 			if !foundExistingComment {
-				logger.Info("creating pull request comment", "owner", owner, "repo", repoName, "pr_number", prNumber)
-				newComment := github.IssueComment{
-					Body: &commentBody,
-				}
-				if _, _, err = gh.Issues.CreateComment(ctx, owner, repoName, prNumber, &newComment); err != nil {
-					return fmt.Errorf("creating pull request comment: %v", err)
+				// Add the identifier as a hidden HTML comment for future detection
+				commentBodyWithIdentifier := fmt.Sprintf("%s\n\n<!-- %s -->", commentBody, commentIdentifier)
+
+				logger.Info("creating pull request comment", "owner", owner, "repo", repoName, "pr_number", prNumber, "is_inline", willCreateInlineComment)
+
+				if willCreateInlineComment {
+					// Create inline review comment for single-commit GitLab MRs
+					newComment := &github.PullRequestComment{
+						Body:     &commentBodyWithIdentifier,
+						CommitID: &inlineCommitSHA,
+						Path:     &comment.Position.NewPath,
+					}
+
+					// Set line and side information
+					if comment.Position.NewLine > 0 {
+						newComment.Line = &comment.Position.NewLine
+						newComment.Side = pointer("RIGHT")
+					} else if comment.Position.OldLine > 0 {
+						newComment.Line = &comment.Position.OldLine
+						newComment.Side = pointer("LEFT")
+					}
+
+					// Try to create inline comment, fallback to PR-level if it fails
+					_, _, err = gh.PullRequests.CreateComment(ctx, owner, repoName, prNumber, newComment)
+					if err != nil {
+						// Inline comment failed (likely line not in diff), fallback to PR-level comment
+						logger.Warn("inline comment creation failed, falling back to PR-level comment",
+							"error", err, "file", comment.Position.NewPath, "line", comment.Position.NewLine)
+
+						// Create fallback comment body with file/line info
+						lineInfo := ""
+						if comment.Position.NewLine > 0 {
+							lineInfo = fmt.Sprintf(" (line %d)", comment.Position.NewLine)
+						} else if comment.Position.OldLine > 0 {
+							lineInfo = fmt.Sprintf(" (line %d in old version)", comment.Position.OldLine)
+						}
+
+						fallbackBody := fmt.Sprintf("**%s** commented on `%s`%s%s:\n\n%s\n\n<!-- %s -->",
+							authorInfo, comment.Position.NewPath, lineInfo, commentDate, comment.Body, commentIdentifier)
+
+						// Create PR-level comment as fallback
+						fallbackComment := &github.IssueComment{
+							Body: &fallbackBody,
+						}
+
+						if _, _, err = gh.Issues.CreateComment(ctx, owner, repoName, prNumber, fallbackComment); err != nil {
+							return fmt.Errorf("creating fallback pull request comment: %v", err)
+						}
+					}
+				} else {
+					// Create PR-level comment using Issues API
+					newComment := &github.IssueComment{
+						Body: &commentBodyWithIdentifier,
+					}
+
+					if _, _, err = gh.Issues.CreateComment(ctx, owner, repoName, prNumber, newComment); err != nil {
+						return fmt.Errorf("creating pull request comment: %v", err)
+					}
 				}
 			}
 		}
@@ -333,7 +436,7 @@ func migrateComments(ctx context.Context, mc *migrationContext, mergeRequest *gi
 
 func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeRequest *gitlab.MergeRequest, mrInDB *db.GitlabMergeRequest) string {
 	if err := ctx.Err(); err != nil {
-		sendErr(fmt.Errorf("preparing to list pull requests: %v", err))
+		recordError(ctx, mc.qtx, mrInDB.ID, fmt.Errorf("preparing to list pull requests: %v", err))
 		return "failed"
 	}
 
@@ -375,7 +478,7 @@ func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeR
 	githubAuthorName := mergeRequest.Author.Name
 	author, err := getGitlabUser(mergeRequest.Author.Username)
 	if err != nil {
-		sendErr(fmt.Errorf("retrieving gitlab user: %v", err))
+		recordError(ctx, mc.qtx, mrInDB.ID, fmt.Errorf("retrieving gitlab user: %v", err))
 		return "failed: retrieving gitlab user"
 	}
 	if author.WebsiteURL != "" {
@@ -408,13 +511,10 @@ func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeR
 > |      |      |
 > | ---- | ---- |
 > | **Original Author** | %[1]s |
-> | **GitLab Project** | [%[4]s/%[5]s](https://%[10]s/%[4]s/%[5]s) |
-> | **GitLab Merge Request** | [%[11]s](https://%[10]s/%[4]s/%[5]s/merge_requests/%[2]d) |
-> | **GitLab MR Number** | [%[2]d](https://%[10]s/%[4]s/%[5]s/merge_requests/%[2]d) |
+> | **GitLab Project** | [%[4]s/%[5]s](https://%[9]s/%[4]s/%[5]s) |
+> | **GitLab Merge Request** | [%[10]s](https://%[9]s/%[4]s/%[5]s/merge_requests/%[2]d) |
+> | **GitLab MR Number** | [%[2]d](https://%[9]s/%[4]s/%[5]s/merge_requests/%[2]d) |
 > | **Date Originally Opened** | %[6]s |%[7]s
-> |      |      |
->
-%[9]s
 
 ## Original Description
 
@@ -432,7 +532,7 @@ func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeR
 	}
 
 	if pullRequest, _, err = gh.PullRequests.Create(ctx, owner, repoName, &newPullRequest); err != nil {
-		sendErr(fmt.Errorf("creating pull request: %v", err))
+		recordError(ctx, mc.qtx, mrInDB.ID, fmt.Errorf("creating pull request: %v", err))
 		requestStr, _ := json.MarshalIndent(newPullRequest, "", "  ")
 		logger.Error(fmt.Sprintf("request: %s", requestStr))
 		return fmt.Sprintf("failed: creating pull request- %s", err.Error())
@@ -444,7 +544,22 @@ func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeR
 		ID:   mrInDB.ID,
 	})
 	if err != nil {
+		recordError(ctx, mc.qtx, mrInDB.ID, fmt.Errorf("create pull request in DB - PR %d: %v", pullRequest.GetNumber(), err))
 		return fmt.Sprintf("failed: create pull request in DB - PR %d", pullRequest.GetNumber())
+	}
+
+	// Record successful PR creation
+	recordInfo(ctx, mc.qtx, mrInDB.ID, fmt.Sprintf("successfully created pull request #%d", pullRequest.GetNumber()))
+
+	// Update mrInDB with the new PR ID for comment migration
+	mrInDB.PrID = int64(pullRequest.GetNumber())
+
+	// Migrate comments while PR is still open
+	logger.Info("migrating comments for pull request", "owner", owner, "repo", repoName, "pr_number", pullRequest.GetNumber())
+	if err := migrateComments(ctx, mc, mergeRequest, mrInDB); err != nil {
+		// Log error but don't fail the entire migration - comments are not critical
+		recordWarning(ctx, mc.qtx, mrInDB.ID, fmt.Sprintf("migrating comments for PR %d: %v", pullRequest.GetNumber(), err))
+		logger.Warn("failed to migrate comments, continuing with merge", "pr_number", pullRequest.GetNumber(), "error", err)
 	}
 
 	// Merge PR (all MRs are merged since they're from master branch)
@@ -456,7 +571,7 @@ func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeR
 
 	mergeResult, _, err := gh.PullRequests.Merge(ctx, owner, repoName, pullRequest.GetNumber(), "", mergeOptions)
 	if err != nil {
-		sendErr(fmt.Errorf("merging pull request: %v", err))
+		recordError(ctx, mc.qtx, mrInDB.ID, fmt.Errorf("merging pull request: %v", err))
 		return fmt.Sprintf("failed: merging pull request - %s", err.Error())
 	}
 
@@ -466,15 +581,18 @@ func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeR
 		"pr_number", pullRequest.GetNumber(),
 		"merge_sha", mergeResult.GetSHA())
 
+	// Record successful merge
+	recordInfo(ctx, mc.qtx, mrInDB.ID, fmt.Sprintf("successfully merged pull request #%d with SHA %s", pullRequest.GetNumber(), mergeResult.GetSHA()))
+
 	// Clean up temporary refs after merging
 	logger.Info("deleting temporary refs for merged pull request", "owner", owner, "repo", repoName, "pr_number", pullRequest.GetNumber(), "source_ref", sourceBranch, "target_ref", targetBranch)
 
 	if err := deleteGitHubRef(ctx, owner, repoName, sourceBranch); err != nil {
-		sendErr(fmt.Errorf("deleting source ref: %v", err))
+		recordWarning(ctx, mc.qtx, mrInDB.ID, fmt.Sprintf("deleting source ref: %v", err))
 	}
 
 	if err := deleteGitHubRef(ctx, owner, repoName, targetBranch); err != nil {
-		sendErr(fmt.Errorf("deleting target ref: %v", err))
+		recordWarning(ctx, mc.qtx, mrInDB.ID, fmt.Sprintf("deleting target ref: %v", err))
 	}
 
 	return "success"

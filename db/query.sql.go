@@ -50,6 +50,29 @@ func (q *Queries) CreateGitlabMergeRequest(ctx context.Context, arg CreateGitlab
 	return i, err
 }
 
+const createMergeRequestNote = `-- name: CreateMergeRequestNote :one
+INSERT INTO gitlab_merge_request_note (merge_request_id, note_type, message) VALUES ($1, $2, $3) RETURNING id, merge_request_id, note_type, message, created_at
+`
+
+type CreateMergeRequestNoteParams struct {
+	MergeRequestID int64
+	NoteType       string
+	Message        string
+}
+
+func (q *Queries) CreateMergeRequestNote(ctx context.Context, arg CreateMergeRequestNoteParams) (GitlabMergeRequestNote, error) {
+	row := q.db.QueryRow(ctx, createMergeRequestNote, arg.MergeRequestID, arg.NoteType, arg.Message)
+	var i GitlabMergeRequestNote
+	err := row.Scan(
+		&i.ID,
+		&i.MergeRequestID,
+		&i.NoteType,
+		&i.Message,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getAllGitLabToGithubMigrationIIDs = `-- name: GetAllGitLabToGithubMigrationIIDs :many
 SELECT mr_iid FROM gitlab_merge_request WHERE migration_id = $1
 `
@@ -214,6 +237,71 @@ func (q *Queries) GetGitlabMergeRequestsWithPRCreated(ctx context.Context, migra
 			&i.Notes,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getMergeRequestNotes = `-- name: GetMergeRequestNotes :many
+SELECT id, merge_request_id, note_type, message, created_at FROM gitlab_merge_request_note WHERE merge_request_id = $1 ORDER BY created_at DESC
+`
+
+func (q *Queries) GetMergeRequestNotes(ctx context.Context, mergeRequestID int64) ([]GitlabMergeRequestNote, error) {
+	rows, err := q.db.Query(ctx, getMergeRequestNotes, mergeRequestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GitlabMergeRequestNote
+	for rows.Next() {
+		var i GitlabMergeRequestNote
+		if err := rows.Scan(
+			&i.ID,
+			&i.MergeRequestID,
+			&i.NoteType,
+			&i.Message,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getMergeRequestNotesByType = `-- name: GetMergeRequestNotesByType :many
+SELECT id, merge_request_id, note_type, message, created_at FROM gitlab_merge_request_note WHERE merge_request_id = $1 AND note_type = $2 ORDER BY created_at DESC
+`
+
+type GetMergeRequestNotesByTypeParams struct {
+	MergeRequestID int64
+	NoteType       string
+}
+
+func (q *Queries) GetMergeRequestNotesByType(ctx context.Context, arg GetMergeRequestNotesByTypeParams) ([]GitlabMergeRequestNote, error) {
+	rows, err := q.db.Query(ctx, getMergeRequestNotesByType, arg.MergeRequestID, arg.NoteType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GitlabMergeRequestNote
+	for rows.Next() {
+		var i GitlabMergeRequestNote
+		if err := rows.Scan(
+			&i.ID,
+			&i.MergeRequestID,
+			&i.NoteType,
+			&i.Message,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}

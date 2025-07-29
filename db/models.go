@@ -37,6 +37,14 @@ type GitlabMergeRequest struct {
 	UpdatedAt        pgtype.Timestamp
 }
 
+type GitlabMergeRequestNote struct {
+	ID             int64
+	MergeRequestID int64
+	NoteType       string
+	Message        string
+	CreatedAt      pgtype.Timestamp
+}
+
 type GitlabToGithubMigration struct {
 	ID                int64
 	GitlabProjectName string
