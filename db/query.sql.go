@@ -74,6 +74,30 @@ func (q *Queries) GetAllGitLabToGithubMigrationIIDs(ctx context.Context, migrati
 	return items, nil
 }
 
+const getAllGitLabToGithubMigrationSHAs = `-- name: GetAllGitLabToGithubMigrationSHAs :many
+SELECT merge_commit_sha FROM gitlab_merge_request WHERE migration_id = $1
+`
+
+func (q *Queries) GetAllGitLabToGithubMigrationSHAs(ctx context.Context, migrationID int64) ([]string, error) {
+	rows, err := q.db.Query(ctx, getAllGitLabToGithubMigrationSHAs, migrationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var merge_commit_sha string
+		if err := rows.Scan(&merge_commit_sha); err != nil {
+			return nil, err
+		}
+		items = append(items, merge_commit_sha)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getAvailableGithubAuthToken = `-- name: GetAvailableGithubAuthToken :one
 UPDATE github_auth_token SET status='in_use', updated_at=CURRENT_TIMESTAMP WHERE id = (SELECT id FROM github_auth_token WHERE status = 'available' ORDER BY rate_limit_remaining DESC, id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id, auth_type, token, app_id, installation_id, private_key_file, status, rate_limit_remaining, rate_limit_reset, notes, created_at, updated_at
 `

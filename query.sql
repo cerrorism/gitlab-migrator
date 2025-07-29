@@ -4,6 +4,9 @@ SELECT * FROM gitlab_to_github_migration WHERE status = 'ONGOING' order by id FO
 -- name: GetAllGitLabToGithubMigrationIIDs :many
 SELECT mr_iid FROM gitlab_merge_request WHERE migration_id = $1;
 
+-- name: GetAllGitLabToGithubMigrationSHAs :many
+SELECT merge_commit_sha FROM gitlab_merge_request WHERE migration_id = $1;
+
 -- name: CreateGitlabMergeRequest :one
 INSERT INTO gitlab_merge_request (migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *;
 

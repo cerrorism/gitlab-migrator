@@ -153,10 +153,11 @@ func cloneRepoForAnalysis(ctx context.Context, githubRepoName string) (*git.Repo
 	logger.Info("cloning repository for analysis", "repo", githubRepoName, "url_masked", fmt.Sprintf("https://***@github.com/%s", githubRepoName))
 
 	repo, err := git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{
-		URL:        cloneURL,
-		Auth:       nil,
-		RemoteName: "origin",
-		Mirror:     false, // We don't need a mirror, just the commit history
+		URL:           cloneURL,
+		Auth:          nil,
+		RemoteName:    "origin",
+		Mirror:        false,                                       // We don't need a mirror, just the commit history
+		ReferenceName: plumbing.ReferenceName("refs/heads/master"), // Specifically clone master branch
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cloning GitHub repo: %v", err)

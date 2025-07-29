@@ -94,9 +94,9 @@ const (
 )
 
 func updateStoredMergeRequests(ctx context.Context, mc *migrationContext) error {
-	existingMergeRequestIIDs, err := mc.qtx.GetAllGitLabToGithubMigrationIIDs(ctx, mc.migration.ID)
+	existingMergeCommitSHAs, err := mc.qtx.GetAllGitLabToGithubMigrationSHAs(ctx, mc.migration.ID)
 	if err != nil {
-		return fmt.Errorf("failed to get existing merge request IIDs: %v", err)
+		return fmt.Errorf("failed to get existing merge commit SHAs: %v", err)
 	}
 
 	mergeRequests, err := getMergeRequestInfoFromLocal(ctx, mc.migration.GithubRepoName)
@@ -104,7 +104,7 @@ func updateStoredMergeRequests(ctx context.Context, mc *migrationContext) error 
 		return fmt.Errorf("failed to get merge requests: %v", err)
 	}
 	for _, mr := range mergeRequests {
-		if slices.Contains(existingMergeRequestIIDs, int64(mr.MrIID)) {
+		if slices.Contains(existingMergeCommitSHAs, mr.MergeCommitSHA) {
 			continue
 		}
 		_, err := mc.qtx.CreateGitlabMergeRequest(ctx, db.CreateGitlabMergeRequestParams{
