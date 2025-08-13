@@ -16,7 +16,7 @@ import (
 const (
 	dateFormat          = "Mon, 2 Jan 2006"
 	dbString            = "user=postgres password=password dbname=postgres sslmode=false"
-	merge_request_limit = 10000
+	merge_request_limit = 5
 )
 
 var (
@@ -93,6 +93,7 @@ type migrationContext struct {
 	gitlabProject *gitlab.Project
 	qtx           *db.Queries
 	githubAuth    *db.GithubAuthToken
+	rateLimiter   *RateLimiter
 }
 
 func setupDb(ctx context.Context) {
@@ -106,11 +107,11 @@ func setupDb(ctx context.Context) {
 
 func main() {
 	// Parse command line arguments
-	var step = flag.String("step", "", "Migration step: update-stored-mrs, migrate-mrs, migrate-discussions, migrate-releases")
+	var step = flag.String("step", "", "Migration step: update-stored-mrs, migrate-mrs, migrate-discussions")
 	flag.Parse()
 
 	// Validate step parameter
-	validSteps := []string{"update-stored-mrs", "migrate-mrs", "migrate-discussions", "migrate-releases"}
+	validSteps := []string{"update-stored-mrs", "migrate-mrs", "migrate-discussions"}
 	isValidStep := false
 	for _, validStep := range validSteps {
 		if *step == validStep {
@@ -165,25 +166,18 @@ func main() {
 		logger.Info("successfully updated stored merge requests")
 	case "migrate-mrs":
 		logger.Info("starting merge request migration from GitLab to GitHub")
-		if err = migrateProject(ctx, mc, *step); err != nil {
+		if err = migrateMergeRequests(ctx, mc, *step); err != nil {
 			sendErr(err)
 			os.Exit(1)
 		}
 		logger.Info("successfully completed merge request migration")
 	case "migrate-discussions":
 		logger.Info("starting discussion migration from GitLab to GitHub")
-		if err = migrateProject(ctx, mc, *step); err != nil {
+		if err = migrateMergeRequests(ctx, mc, *step); err != nil {
 			sendErr(err)
 			os.Exit(1)
 		}
 		logger.Info("successfully completed discussion migration")
-	case "migrate-releases":
-		logger.Info("starting release creation for merge requests")
-		if err = migrateProject(ctx, mc, *step); err != nil {
-			sendErr(err)
-			os.Exit(1)
-		}
-		logger.Info("successfully completed release creation")
 	}
 
 	if errCount > 0 {
