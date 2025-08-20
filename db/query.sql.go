@@ -212,42 +212,6 @@ func (q *Queries) GetGitlabMergeRequests(ctx context.Context, arg GetGitlabMerge
 	return items, nil
 }
 
-const getGitlabMergeRequestsWithPRCreated = `-- name: GetGitlabMergeRequestsWithPRCreated :many
-UPDATE gitlab_merge_request SET status='ONGOING_DISCUSSION' WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = 'PR_CREATED' order by id FOR UPDATE SKIP LOCKED limit 5000) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
-`
-
-func (q *Queries) GetGitlabMergeRequestsWithPRCreated(ctx context.Context, migrationID int64) ([]GitlabMergeRequest, error) {
-	rows, err := q.db.Query(ctx, getGitlabMergeRequestsWithPRCreated, migrationID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []GitlabMergeRequest
-	for rows.Next() {
-		var i GitlabMergeRequest
-		if err := rows.Scan(
-			&i.ID,
-			&i.MigrationID,
-			&i.MrIid,
-			&i.MergeCommitSha,
-			&i.Parent1CommitSha,
-			&i.Parent2CommitSha,
-			&i.PrID,
-			&i.Status,
-			&i.Notes,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const getMergeRequestNotes = `-- name: GetMergeRequestNotes :many
 SELECT id, merge_request_id, note_type, message, created_at FROM gitlab_merge_request_note WHERE merge_request_id = $1 ORDER BY created_at DESC
 `
