@@ -309,6 +309,7 @@ func updateStoredMergeRequests(ctx context.Context, mc *migrationContext) error 
 	if err != nil {
 		return fmt.Errorf("failed to get merge requests: %v", err)
 	}
+
 	for _, mr := range mergeRequests {
 		if slices.Contains(existingMergeCommitSHAs, mr.MergeCommitSHA) {
 			continue
@@ -364,6 +365,11 @@ func migratePullRequests(ctx context.Context, mc *migrationContext, step string)
 		sourceStatus = MergeRequestStatusMRFound
 		middleStatus = MergeRequestStatusPRCreatedOngoing
 		targetStatus = MergeRequestStatusPRCreated
+	case "migrate-mrs-retry":
+		operationDesc = "PR retry migration"
+		sourceStatus = MergeRequestStatusPRCreated + "_FAILED"
+		middleStatus = MergeRequestStatusPRCreatedOngoing
+		targetStatus = MergeRequestStatusPRCreated
 	case "migrate-discussions":
 		operationDesc = "discussion migration"
 		sourceStatus = MergeRequestStatusPRCreated
@@ -384,10 +390,17 @@ func migratePullRequests(ctx context.Context, mc *migrationContext, step string)
 		return
 	}
 
-	logger.Info(fmt.Sprintf("starting %s with GitHub API header-based rate limiting", operationDesc),
+	logArgs := []interface{}{
 		"total_mrs", len(mrs),
 		"step", step,
-		"rate_limiting", "Dynamic based on GitHub API response headers")
+		"rate_limiting", "Dynamic based on GitHub API response headers",
+	}
+
+	if step == "migrate-mrs-retry" {
+		logArgs = append(logArgs, "retry_source_status", sourceStatus)
+	}
+
+	logger.Info(fmt.Sprintf("starting %s with GitHub API header-based rate limiting", operationDesc), logArgs...)
 
 	successCount := 0
 	errorCount := 0
@@ -419,7 +432,7 @@ func migratePullRequests(ctx context.Context, mc *migrationContext, step string)
 		// Execute the appropriate function based on step
 		var result string
 		switch step {
-		case "migrate-mrs":
+		case "migrate-mrs", "migrate-mrs-retry":
 			result = migrateSingleMergeRequest(ctx, mc, mergeRequest, &mr)
 		case "migrate-discussions":
 			err := migrateComments(ctx, mc, mergeRequest, &mr)

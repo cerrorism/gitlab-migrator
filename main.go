@@ -16,7 +16,7 @@ import (
 const (
 	dateFormat          = "Mon, 2 Jan 2006"
 	dbString            = "user=postgres password=password dbname=postgres sslmode=false"
-	merge_request_limit = 5
+	merge_request_limit = 10000
 )
 
 var (
@@ -107,11 +107,11 @@ func setupDb(ctx context.Context) {
 
 func main() {
 	// Parse command line arguments
-	var step = flag.String("step", "", "Migration step: update-stored-mrs, migrate-mrs, migrate-discussions")
+	var step = flag.String("step", "", "Migration step: update-stored-mrs, migrate-mrs, migrate-mrs-retry, migrate-discussions")
 	flag.Parse()
 
 	// Validate step parameter
-	validSteps := []string{"update-stored-mrs", "migrate-mrs", "migrate-discussions"}
+	validSteps := []string{"update-stored-mrs", "migrate-mrs", "migrate-mrs-retry", "migrate-discussions"}
 	isValidStep := false
 	for _, validStep := range validSteps {
 		if *step == validStep {
@@ -171,6 +171,13 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("successfully completed merge request migration")
+	case "migrate-mrs-retry":
+		logger.Info("retrying failed merge request migration from GitLab to GitHub")
+		if err = migrateMergeRequests(ctx, mc, *step); err != nil {
+			sendErr(err)
+			os.Exit(1)
+		}
+		logger.Info("successfully completed merge request retry migration")
 	case "migrate-discussions":
 		logger.Info("starting discussion migration from GitLab to GitHub")
 		if err = migrateMergeRequests(ctx, mc, *step); err != nil {

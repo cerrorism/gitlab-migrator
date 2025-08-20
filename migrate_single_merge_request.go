@@ -18,16 +18,67 @@ func createGitHubRef(ctx context.Context, owner, repo, refName, commitSHA string
 }
 
 // createGitHubRefWithType creates a GitHub ref of the specified type pointing to a specific commit SHA
+// This function is idempotent - it will check if the ref already exists with the same SHA before creating
 func createGitHubRefWithType(ctx context.Context, owner, repo, refName, commitSHA, refType string, mc *migrationContext) error {
 	fullRefName := "refs/" + refType + "/" + refName
+
+	// First, check if the ref already exists with the same SHA
+	// Apply rate limiting before checking GitHub resource
+	if err := mc.rateLimiter.Wait(ctx); err != nil {
+		return fmt.Errorf("rate limiter wait failed: %v", err)
+	}
+
+	existingRef, resp, err := gh.Git.GetRef(ctx, owner, repo, refType+"/"+refName)
+	if err == nil {
+		// Update rate limiter with response headers from the check
+		mc.rateLimiter.UpdateFromResponse(resp)
+
+		// Ref exists, check if it points to the same SHA
+		if existingRef != nil && existingRef.Object != nil && existingRef.Object.GetSHA() == commitSHA {
+			logger.Info("ref already exists with correct SHA, skipping creation",
+				"ref", refName, "type", refType, "sha", commitSHA)
+			return nil
+		}
+
+		// Ref exists but points to different SHA, we need to update it
+		logger.Info("ref exists with different SHA, updating",
+			"ref", refName, "type", refType, "existing_sha", existingRef.Object.GetSHA(), "new_sha", commitSHA)
+
+		// Apply rate limiting before updating GitHub resource
+		if err := mc.rateLimiter.Wait(ctx); err != nil {
+			return fmt.Errorf("rate limiter wait failed: %v", err)
+		}
+
+		// Update the existing ref
+		_, resp, err := gh.Git.UpdateRef(ctx, owner, repo, &github.Reference{
+			Ref: &fullRefName,
+			Object: &github.GitObject{
+				SHA: &commitSHA,
+			},
+		}, false) // force update
+		if err != nil {
+			mc.rateLimiter.UpdateFromError(err)
+			return fmt.Errorf("updating ref %s: %v", refName, err)
+		}
+
+		mc.rateLimiter.UpdateFromResponse(resp)
+		logger.Info("updated ref", "ref", refName, "type", refType, "sha", commitSHA)
+		return nil
+	}
+
+	// Update rate limiter with error info from the check (might contain rate limit info)
+	mc.rateLimiter.UpdateFromError(err)
+
+	// Ref doesn't exist, create it
+	logger.Info("ref does not exist, creating", "ref", refName, "type", refType, "sha", commitSHA)
 
 	// Apply rate limiting before creating GitHub resource
 	if err := mc.rateLimiter.Wait(ctx); err != nil {
 		return fmt.Errorf("rate limiter wait failed: %v", err)
 	}
 
-	// Create ref directly (no existence check for speed)
-	_, resp, err := gh.Git.CreateRef(ctx, owner, repo, &github.Reference{
+	// Create ref
+	_, resp, err = gh.Git.CreateRef(ctx, owner, repo, &github.Reference{
 		Ref: &fullRefName,
 		Object: &github.GitObject{
 			SHA: &commitSHA,
@@ -328,8 +379,8 @@ func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeR
 	owner, repoName := githubPath[0], githubPath[1]
 
 	// Generate temporary branch names for merged MRs (all MRs are merged since they're from master branch)
-	sourceBranch := fmt.Sprintf("migration-source-%d", mergeRequest.IID)
-	targetBranch := fmt.Sprintf("migration-target-%d", mergeRequest.IID)
+	sourceBranch := fmt.Sprintf("migration-source-%d-mr", mergeRequest.IID)
+	targetBranch := fmt.Sprintf("migration-target-%d-mr", mergeRequest.IID)
 
 	// Validate we have the necessary commit SHAs
 	if mrInDB.Parent1CommitSha == "" || mrInDB.Parent2CommitSha == "" {
@@ -399,34 +450,120 @@ func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeR
 
 %[3]s`, githubAuthorName, mergeRequest.IID, description, gitlabPath[0], gitlabPath[1], mergeRequest.CreatedAt.Format(dateFormat), mergedDate, originalState, "gitlab.com", mergeRequestTitle)
 
-	// Create the pull request
-	logger.Info("creating pull request", "source_branch", sourceBranch, "target_branch", targetBranch)
-	newPullRequest := github.NewPullRequest{
-		Title:               &mergeRequest.Title,
-		Head:                &sourceBranch,
-		Base:                &targetBranch,
-		Body:                &body,
-		MaintainerCanModify: pointer(true),
-		Draft:               &mergeRequest.Draft,
-	}
+	// Check if pull request already exists with the same source branch (idempotency)
+	logger.Info("checking for existing pull request", "source_branch", sourceBranch, "target_branch", targetBranch)
 
-	// Apply rate limiting before creating GitHub PR
+	// Apply rate limiting before searching GitHub PRs
 	if err := mc.rateLimiter.Wait(ctx); err != nil {
 		return fmt.Sprintf("failed: rate limiter wait failed - %s", err.Error())
 	}
 
-	var resp *github.Response
-	if pullRequest, resp, err = gh.PullRequests.Create(ctx, owner, repoName, &newPullRequest); err != nil {
+	// Search for existing PRs with the same head branch
+	searchQuery := fmt.Sprintf("head:%s repo:%s/%s", sourceBranch, owner, repoName)
+	searchResult, resp, err := gh.Search.Issues(ctx, searchQuery, &github.SearchOptions{
+		ListOptions: github.ListOptions{
+			PerPage: 10, // We only expect one match, but allow a few in case of duplicates
+		},
+	})
+	if err != nil {
 		// Update rate limiter with error info (might contain secondary rate limit)
 		mc.rateLimiter.UpdateFromError(err)
-		recordError(ctx, mc.qtx, mrInDB.ID, fmt.Errorf("creating pull request: %v", err))
-		requestStr, _ := json.MarshalIndent(newPullRequest, "", "  ")
-		logger.Error(fmt.Sprintf("request: %s", requestStr))
-		return fmt.Sprintf("failed: creating pull request- %s", err.Error())
+		recordError(ctx, mc.qtx, mrInDB.ID, fmt.Errorf("searching for existing pull request: %v", err))
+		return fmt.Sprintf("failed: searching for existing pull request - %s", err.Error())
 	}
 
-	// Update rate limiter with response headers from PR creation
+	// Update rate limiter with response headers from search
 	mc.rateLimiter.UpdateFromResponse(resp)
+
+	if searchResult != nil && len(searchResult.Issues) > 0 {
+		// Found existing PR(s), use the first one
+		existingIssue := searchResult.Issues[0]
+
+		logger.Info("found existing pull request, will reuse",
+			"existing_pr_number", existingIssue.GetNumber(),
+			"existing_pr_title", existingIssue.GetTitle(),
+			"source_branch", sourceBranch)
+
+		// Apply rate limiting before getting full PR details
+		if err := mc.rateLimiter.Wait(ctx); err != nil {
+			return fmt.Sprintf("failed: rate limiter wait failed - %s", err.Error())
+		}
+
+		// Get full PR details
+		pullRequest, resp, err = gh.PullRequests.Get(ctx, owner, repoName, existingIssue.GetNumber())
+		if err != nil {
+			mc.rateLimiter.UpdateFromError(err)
+			recordError(ctx, mc.qtx, mrInDB.ID, fmt.Errorf("getting existing pull request details: %v", err))
+			return fmt.Sprintf("failed: getting existing pull request details - %s", err.Error())
+		}
+
+		mc.rateLimiter.UpdateFromResponse(resp)
+
+		if pullRequest == nil {
+			return "failed: existing pull request not found"
+		}
+
+		logger.Info("reusing existing pull request",
+			"pr_number", pullRequest.GetNumber(),
+			"pr_state", pullRequest.GetState())
+
+		// Check if the existing PR is already merged
+		if pullRequest.GetMerged() {
+			logger.Info("existing pull request is already merged",
+				"pr_number", pullRequest.GetNumber(),
+				"merged_at", pullRequest.GetMergedAt())
+
+			// Record successful PR creation and merge (idempotent)
+			recordInfo(ctx, mc.qtx, mrInDB.ID, fmt.Sprintf("reused existing merged pull request #%d", pullRequest.GetNumber()))
+
+			// Skip the merge step since it's already merged
+			goto skipMerge
+		}
+
+		// Check if the existing PR is closed but not merged
+		if pullRequest.GetState() == "closed" && !pullRequest.GetMerged() {
+			logger.Warn("existing pull request is closed but not merged",
+				"pr_number", pullRequest.GetNumber(),
+				"closed_at", pullRequest.GetClosedAt())
+
+			recordWarning(ctx, mc.qtx, mrInDB.ID, fmt.Sprintf("existing pull request #%d is closed but not merged", pullRequest.GetNumber()))
+			return fmt.Sprintf("failed: existing pull request #%d is closed but not merged", pullRequest.GetNumber())
+		}
+	} else {
+		// No existing PR found, create a new one
+		logger.Info("no existing pull request found, creating new one", "source_branch", sourceBranch, "target_branch", targetBranch)
+
+		newPullRequest := github.NewPullRequest{
+			Title:               &mergeRequest.Title,
+			Head:                &sourceBranch,
+			Base:                &targetBranch,
+			Body:                &body,
+			MaintainerCanModify: pointer(true),
+			Draft:               &mergeRequest.Draft,
+		}
+
+		// Apply rate limiting before creating GitHub PR
+		if err := mc.rateLimiter.Wait(ctx); err != nil {
+			return fmt.Sprintf("failed: rate limiter wait failed - %s", err.Error())
+		}
+
+		if pullRequest, resp, err = gh.PullRequests.Create(ctx, owner, repoName, &newPullRequest); err != nil {
+			// Update rate limiter with error info (might contain secondary rate limit)
+			mc.rateLimiter.UpdateFromError(err)
+			recordError(ctx, mc.qtx, mrInDB.ID, fmt.Errorf("creating pull request: %v", err))
+			requestStr, _ := json.MarshalIndent(newPullRequest, "", "  ")
+			logger.Error(fmt.Sprintf("request: %s", requestStr))
+			return fmt.Sprintf("failed: creating pull request- %s", err.Error())
+		}
+
+		// Update rate limiter with response headers from PR creation
+		mc.rateLimiter.UpdateFromResponse(resp)
+
+		logger.Info("created new pull request", "pr_number", pullRequest.GetNumber())
+
+		// Record successful PR creation only for new PRs
+		recordInfo(ctx, mc.qtx, mrInDB.ID, fmt.Sprintf("successfully created pull request #%d", pullRequest.GetNumber()))
+	}
 
 	// Store PR in database
 	err = mc.qtx.UpdateGitlabMergeRequestPRID(ctx, db.UpdateGitlabMergeRequestPRIDParams{
@@ -438,33 +575,37 @@ func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeR
 		return fmt.Sprintf("failed: create pull request in DB - PR %d", pullRequest.GetNumber())
 	}
 
-	// Record successful PR creation
-	recordInfo(ctx, mc.qtx, mrInDB.ID, fmt.Sprintf("successfully created pull request #%d", pullRequest.GetNumber()))
-
 	// Update mrInDB with the new PR ID
 	mrInDB.PrID = int64(pullRequest.GetNumber())
 
 	// Merge PR (all MRs are merged since they're from master branch)
-	logger.Info("merging pull request using squash and merge", "owner", owner, "repo", repoName, "pr_number", pullRequest.GetNumber())
+	// Check if PR is already merged first
+	if !pullRequest.GetMerged() {
+		logger.Info("merging pull request using squash and merge", "owner", owner, "repo", repoName, "pr_number", pullRequest.GetNumber())
 
-	mergeOptions := &github.PullRequestOptions{
-		MergeMethod: "squash", // Use squash and merge
+		mergeOptions := &github.PullRequestOptions{
+			MergeMethod: "squash", // Use squash and merge
+		}
+
+		mergeResult, _, err := gh.PullRequests.Merge(ctx, owner, repoName, pullRequest.GetNumber(), "", mergeOptions)
+		if err != nil {
+			recordError(ctx, mc.qtx, mrInDB.ID, fmt.Errorf("merging pull request: %v", err))
+			return fmt.Sprintf("failed: merging pull request - %s", err.Error())
+		}
+
+		logger.Info("successfully merged pull request",
+			"owner", owner,
+			"repo", repoName,
+			"pr_number", pullRequest.GetNumber(),
+			"merge_sha", mergeResult.GetSHA())
+
+		// Record successful merge
+		recordInfo(ctx, mc.qtx, mrInDB.ID, fmt.Sprintf("successfully merged pull request #%d with SHA %s", pullRequest.GetNumber(), mergeResult.GetSHA()))
+	} else {
+		logger.Info("pull request already merged, skipping merge step", "pr_number", pullRequest.GetNumber())
 	}
 
-	mergeResult, _, err := gh.PullRequests.Merge(ctx, owner, repoName, pullRequest.GetNumber(), "", mergeOptions)
-	if err != nil {
-		recordError(ctx, mc.qtx, mrInDB.ID, fmt.Errorf("merging pull request: %v", err))
-		return fmt.Sprintf("failed: merging pull request - %s", err.Error())
-	}
-
-	logger.Info("successfully merged pull request",
-		"owner", owner,
-		"repo", repoName,
-		"pr_number", pullRequest.GetNumber(),
-		"merge_sha", mergeResult.GetSHA())
-
-	// Record successful merge
-	recordInfo(ctx, mc.qtx, mrInDB.ID, fmt.Sprintf("successfully merged pull request #%d with SHA %s", pullRequest.GetNumber(), mergeResult.GetSHA()))
+skipMerge:
 
 	// Clean up temporary refs after merging
 	logger.Info("deleting temporary refs for merged pull request", "owner", owner, "repo", repoName, "pr_number", pullRequest.GetNumber(), "source_ref", sourceBranch, "target_ref", targetBranch)
