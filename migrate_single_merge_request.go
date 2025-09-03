@@ -391,7 +391,7 @@ func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeR
 		"mr_iid", mergeRequest.IID,
 		"source_ref", sourceBranch,
 		"target_ref", targetBranch,
-		"source_sha", mrInDB.Parent2CommitSha,
+		"source_sha", mrInDB.MergeCommitSha,
 		"target_sha", mrInDB.Parent1CommitSha)
 
 	// Create target ref (base branch) pointing to Parent1CommitSha
@@ -400,7 +400,7 @@ func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeR
 	}
 
 	// Create source ref (head branch) pointing to Parent2CommitSha
-	if err := createGitHubRef(ctx, owner, repoName, sourceBranch, mrInDB.Parent2CommitSha, mc); err != nil {
+	if err := createGitHubRef(ctx, owner, repoName, sourceBranch, mrInDB.MergeCommitSha, mc); err != nil {
 		return fmt.Sprintf("failed: creating source ref - %s", err.Error())
 	}
 
@@ -532,6 +532,12 @@ func migrateSingleMergeRequest(ctx context.Context, mc *migrationContext, mergeR
 	} else {
 		// No existing PR found, create a new one
 		logger.Info("no existing pull request found, creating new one", "source_branch", sourceBranch, "target_branch", targetBranch)
+
+		if len(body) > 60000 {
+			body = body[:60000]
+			body = body + "\n\n> [!WARNING]\n> This pull request body is too long, truncated to 60000 characters"
+			recordWarning(ctx, mc.qtx, mrInDB.ID, "pull request body is too long, truncated to 60000 characters")
+		}
 
 		newPullRequest := github.NewPullRequest{
 			Title:               &mergeRequest.Title,

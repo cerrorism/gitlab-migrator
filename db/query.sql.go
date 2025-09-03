@@ -165,7 +165,7 @@ func (q *Queries) GetGitLabToGithubMigration(ctx context.Context) (GitlabToGithu
 }
 
 const getGitlabMergeRequests = `-- name: GetGitlabMergeRequests :many
-UPDATE gitlab_merge_request SET status=$3 WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = $4 order by id FOR UPDATE SKIP LOCKED limit $2) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
+UPDATE gitlab_merge_request SET status=$3 WHERE id in (SELECT id FROM gitlab_merge_request as gmr WHERE gmr.migration_id = $1 and gmr.status = $4 order by mr_iid FOR UPDATE SKIP LOCKED limit $2) RETURNING id, migration_id, mr_iid, merge_commit_sha, parent1_commit_sha, parent2_commit_sha, pr_id, status, notes, created_at, updated_at
 `
 
 type GetGitlabMergeRequestsParams struct {

@@ -16,7 +16,7 @@ import (
 const (
 	dateFormat          = "Mon, 2 Jan 2006"
 	dbString            = "user=postgres password=password dbname=postgres sslmode=false"
-	merge_request_limit = 10000
+	merge_request_limit = 500
 )
 
 var (
@@ -168,27 +168,26 @@ func main() {
 		logger.Info("starting merge request migration from GitLab to GitHub")
 		if err = migrateMergeRequests(ctx, mc, *step); err != nil {
 			sendErr(err)
-			os.Exit(1)
+		} else {
+			logger.Info("successfully completed merge request migration")
 		}
-		logger.Info("successfully completed merge request migration")
 	case "migrate-mrs-retry":
 		logger.Info("retrying failed merge request migration from GitLab to GitHub")
 		if err = migrateMergeRequests(ctx, mc, *step); err != nil {
 			sendErr(err)
-			os.Exit(1)
+		} else {
+			logger.Info("successfully completed merge request retry migration")
 		}
-		logger.Info("successfully completed merge request retry migration")
 	case "migrate-discussions":
 		logger.Info("starting discussion migration from GitLab to GitHub")
 		if err = migrateMergeRequests(ctx, mc, *step); err != nil {
 			sendErr(err)
-			os.Exit(1)
+		} else {
+			logger.Info("successfully completed discussion migration")
 		}
-		logger.Info("successfully completed discussion migration")
 	}
 
 	if errCount > 0 {
 		logger.Warn(fmt.Sprintf("encountered %d errors during operation, review log output for details", errCount))
-		os.Exit(1)
 	}
 }
